@@ -1,0 +1,15 @@
+{
+  "solution": {
+    "path": "PowerLease.sln",
+    "projects": [
+      "src\\PowerLease.Domain\\PowerLease.Domain.csproj",
+      "src\\PowerLease.Application\\PowerLease.Application.csproj",
+      "src\\PowerLease.Persistence\\PowerLease.Persistence.csproj",
+      "src\\PowerLease.Ipc.Contracts\\PowerLease.Ipc.Contracts.csproj",
+      "src\\PowerLease.Cli\\PowerLease.Cli.csproj",
+      "tests\\PowerLease.Domain.Tests\\PowerLease.Domain.Tests.csproj",
+      "tests\\PowerLease.Application.Tests\\PowerLease.Application.Tests.csproj",
+      "tests\\PowerLease.Persistence.Tests\\PowerLease.Persistence.Tests.csproj"
+    ]
+  }
+}

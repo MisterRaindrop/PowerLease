@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows</TargetFramework>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\PowerLease.Domain\PowerLease.Domain.csproj" />
+    <ProjectReference Include="..\PowerLease.Application\PowerLease.Application.csproj" />
+  </ItemGroup>
+</Project>
