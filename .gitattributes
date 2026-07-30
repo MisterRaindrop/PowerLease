@@ -1,14 +1,16 @@
-# 行尾在所有平台上都必须确定，且必须与 .editorconfig 的 `end_of_line = lf` 一致。
+# Line endings must be deterministic on every platform and must agree with the
+# `end_of_line = lf` declared in .editorconfig.
 #
-# 没有这个文件时，Windows runner 的 git 会按 core.autocrlf 把文本文件检出成 CRLF，
-# 于是 `dotnet format --verify-no-changes` 在 Linux/macOS 上通过、在 Windows 上
-# 报几百个 ENDOFLINE 错误。eol=lf 让检出到工作区的文件也保持 LF。
+# Without this file, git on a Windows runner checks text files out as CRLF
+# (core.autocrlf), so `dotnet format --verify-no-changes` passes on Linux/macOS
+# and fails on Windows with hundreds of ENDOFLINE errors. eol=lf keeps the
+# working tree on LF as well.
 #
-# 全仓库统一 LF（包括 .sln 和将来的 .ps1）—— 不给任何文件类型开 CRLF 例外，
-# 否则又会和 .editorconfig 打架。
+# LF everywhere, including .sln and any future .ps1 -- no per-type CRLF
+# exception, because an exception would just disagree with .editorconfig again.
 * text=auto eol=lf
 
-# 二进制文件：明确排除任何行尾或编码转换
+# Binary files: exclude from any line-ending or encoding conversion
 *.png binary
 *.jpg binary
 *.jpeg binary

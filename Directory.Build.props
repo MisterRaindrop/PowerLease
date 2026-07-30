@@ -12,7 +12,7 @@
     <Version>0.0.1</Version>
     <Company>PowerLease</Company>
     <Product>PowerLease</Product>
-    <Description>面向远程 Windows 开发机的保持开机工具</Description>
+    <Description>Keep-awake tool for remote Windows development machines</Description>
     <GenerateDocumentationFile>false</GenerateDocumentationFile>
   </PropertyGroup>
 </Project>
