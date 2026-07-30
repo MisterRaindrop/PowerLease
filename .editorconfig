@@ -24,3 +24,10 @@ indent_size = 2
 
 [*.md]
 trim_trailing_whitespace = false
+
+# 测试工程：允许 Method_scenario_expectation 这种下划线命名。
+# CA1707 的目的是保持【公共 API】命名整洁，测试方法不是 API 表面；
+# 而可读的测试名本身就是失败时最重要的诊断信息。
+# 只在 tests/ 下关闭，src/ 仍然严格执行。
+[tests/**/*.cs]
+dotnet_diagnostic.CA1707.severity = none
