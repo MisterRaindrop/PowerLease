@@ -1,0 +1,80 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  crossplat-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v5
+
+      - name: Restore cross-platform solution
+        run: dotnet restore PowerLease.CrossPlatform.slnf --locked-mode
+
+      - name: Build cross-platform solution
+        run: dotnet build PowerLease.CrossPlatform.slnf -c Release --no-restore
+
+      - name: Test cross-platform solution
+        run: >-
+          dotnet test PowerLease.CrossPlatform.slnf -c Release --no-build
+          --filter "Category!=RealMachine"
+          --logger "trx;LogFileName=crossplat.trx"
+          --results-directory TestResults
+          --collect:"XPlat Code Coverage"
+
+      - name: Upload cross-platform test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: crossplat-test-results
+          path: TestResults
+
+  build-test:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v5
+
+      - name: Restore solution
+        run: dotnet restore PowerLease.sln --locked-mode
+
+      - name: Verify formatting
+        run: dotnet format PowerLease.sln --verify-no-changes --severity warn --no-restore
+
+      - name: Build solution
+        run: dotnet build PowerLease.sln -c Release --no-restore
+
+      - name: Test solution
+        run: >-
+          dotnet test PowerLease.sln -c Release --no-build
+          --filter "Category!=RealMachine"
+          --logger "trx;LogFileName=windows.trx"
+          --results-directory TestResults
+          --collect:"XPlat Code Coverage"
+
+      - name: Upload Windows test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-test-results
+          path: TestResults
