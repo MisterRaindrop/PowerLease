@@ -9,7 +9,9 @@
       "src\\PowerLease.Cli\\PowerLease.Cli.csproj",
       "tests\\PowerLease.Domain.Tests\\PowerLease.Domain.Tests.csproj",
       "tests\\PowerLease.Application.Tests\\PowerLease.Application.Tests.csproj",
-      "tests\\PowerLease.Persistence.Tests\\PowerLease.Persistence.Tests.csproj"
+      "tests\\PowerLease.Persistence.Tests\\PowerLease.Persistence.Tests.csproj",
+      "tests\\PowerLease.Ipc.Contracts.Tests\\PowerLease.Ipc.Contracts.Tests.csproj",
+      "tests\\PowerLease.Cli.Tests\\PowerLease.Cli.Tests.csproj"
     ]
   }
 }
