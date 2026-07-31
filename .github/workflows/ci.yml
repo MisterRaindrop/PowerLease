@@ -78,3 +78,130 @@ jobs:
         with:
           name: windows-test-results
           path: TestResults
+
+  installer:
+    runs-on: windows-latest
+    needs: build-test
+    timeout-minutes: 25
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v5
+
+      # Service and CLI are published separately into their own directories. Both are
+      # self-contained, so they each carry a full runtime with identical file names and
+      # would collide if installed into one folder.
+      #
+      # Publishing with a runtime identifier rewrites every packages.lock.json to include
+      # the win-x64 RID graph. That is harmless HERE because the runner workspace is
+      # thrown away and no later step restores with --locked-mode. It is not harmless in a
+      # developer's working tree: the committed locks are deliberately RID-agnostic so the
+      # other two jobs can restore with --locked-mode, so never commit locks that a RID
+      # publish has touched. (Setting RestorePackagesWithLockFile=false is not an option --
+      # NuGet rejects that as NU1005 when a lock file exists.)
+      - name: Publish service
+        run: >-
+          dotnet publish src/PowerLease.Service/PowerLease.Service.csproj
+          -c Release -r win-x64 --self-contained true
+          -o artifacts/publish/Service
+
+      - name: Publish CLI
+        run: >-
+          dotnet publish src/PowerLease.Cli/PowerLease.Cli.csproj
+          -c Release -r win-x64 --self-contained true
+          -o artifacts/publish/Cli
+
+      - name: Build MSI
+        run: >-
+          dotnet build installer/PowerLease.Setup/PowerLease.Setup.wixproj
+          -c Release
+          -p:ServicePublishDir=${{ github.workspace }}\artifacts\publish\Service\
+          -p:CliPublishDir=${{ github.workspace }}\artifacts\publish\Cli\
+
+      - name: Build bundle
+        run: >-
+          dotnet build installer/PowerLease.Bundle/PowerLease.Bundle.wixproj
+          -c Release
+          -p:MsiPath=${{ github.workspace }}\installer\PowerLease.Setup\bin\Release\PowerLease.msi
+
+      # The only place the installer's behaviour is actually verified. Every claim the MSI
+      # makes about the service, PATH and ProgramData is unproven until this runs, because
+      # the development machine for this project is macOS.
+      - name: Installer smoke test (MSI)
+        shell: pwsh
+        run: >-
+          installer/tests/Invoke-InstallerSmokeTest.ps1
+          -MsiPath "${{ github.workspace }}\installer\PowerLease.Setup\bin\Release\PowerLease.msi"
+
+      # Same assertions against the Setup EXE, because that is the path a real user takes and
+      # a bundle can be broken in ways its inner MSI is not.
+      - name: Installer smoke test (Setup EXE)
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem "${{ github.workspace }}\installer\PowerLease.Bundle\bin\Release" -Filter 'PowerLease-Setup-*-x64.exe' -Recurse |
+                 Select-Object -First 1
+          if (-not $exe) { throw 'No Setup EXE was produced by the bundle build.' }
+          Write-Host "Testing $($exe.FullName)"
+          installer/tests/Invoke-InstallerSmokeTest.ps1 -BundlePath $exe.FullName
+
+      - name: Upload installer artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: installer
+          path: |
+            installer/PowerLease.Setup/bin/**/*.msi
+            installer/PowerLease.Bundle/bin/**/*.exe
+
+      # Upgrade needs two versions. Rebuilding the same sources at 0.0.2 exercises the real
+      # MajorUpgrade path without depending on a published release.
+      #
+      # -t:Rebuild is required for two reasons. MSBuild's incremental check otherwise skips the
+      # link step, so the bundle never produces obj\Release\PowerLease-Setup-0.0.2-x64.exe for
+      # the copy step to find (MSB3030). And for the MSI, whose output name does not carry the
+      # version, a skipped build would leave 0.0.1 content behind and the "upgrade" test would
+      # silently compare a package against itself.
+      #
+      # Rebuild also means Clean, which deletes the 0.0.1 Setup EXE from bin\Release, so it is
+      # copied aside first.
+      - name: Stage v0.0.1 package and build v0.0.2
+        run: |
+          $stage = "${{ github.workspace }}\artifacts\upgrade"
+          New-Item -ItemType Directory -Force -Path "$stage\old", "$stage\new" | Out-Null
+          $old = Get-ChildItem "${{ github.workspace }}\installer\PowerLease.Bundle\bin\Release" -Filter 'PowerLease-Setup-0.0.1-x64.exe' -Recurse | Select-Object -First 1
+          if (-not $old) { throw 'v0.0.1 Setup EXE not found before staging.' }
+          Copy-Item $old.FullName "$stage\old\"
+
+          dotnet build installer/PowerLease.Setup/PowerLease.Setup.wixproj -c Release -t:Rebuild -p:Version=0.0.2 `
+            -p:ServicePublishDir="${{ github.workspace }}\artifacts\publish\Service\" `
+            -p:CliPublishDir="${{ github.workspace }}\artifacts\publish\Cli\"
+          if ($LASTEXITCODE -ne 0) { throw 'MSI rebuild at 0.0.2 failed.' }
+          dotnet build installer/PowerLease.Bundle/PowerLease.Bundle.wixproj -c Release -t:Rebuild -p:Version=0.0.2 `
+            -p:MsiPath="${{ github.workspace }}\installer\PowerLease.Setup\bin\Release\PowerLease.msi"
+          if ($LASTEXITCODE -ne 0) { throw 'Bundle rebuild at 0.0.2 failed.' }
+
+          $new = Get-ChildItem "${{ github.workspace }}\installer\PowerLease.Bundle\bin\Release" -Filter 'PowerLease-Setup-0.0.2-x64.exe' -Recurse | Select-Object -First 1
+          if (-not $new) { throw 'v0.0.2 Setup EXE not produced.' }
+          Copy-Item $new.FullName "$stage\new\"
+          Get-ChildItem "$stage" -Recurse -File | ForEach-Object { Write-Host $_.FullName }
+        shell: pwsh
+
+      - name: Upgrade and data-retention test
+        shell: pwsh
+        run: |
+          $stage = "${{ github.workspace }}\artifacts\upgrade"
+          installer/tests/Invoke-UpgradeTest.ps1 `
+            -OldPackage (Join-Path $stage 'old\PowerLease-Setup-0.0.1-x64.exe') `
+            -NewPackage (Join-Path $stage 'new\PowerLease-Setup-0.0.2-x64.exe')
+
+      - name: Upload msiexec logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: msiexec-logs
+          # Covers powerlease-*, upgrade-* and purge-* logs; a narrower glob meant the
+          # upgrade failures had no evidence attached.
+          path: ${{ runner.temp }}/*.log
+          if-no-files-found: ignore

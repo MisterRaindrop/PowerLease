@@ -1,0 +1,263 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
+
+  <!--
+    PowerLease per-machine installer.
+
+    Deliberate design decisions, each with a reason that is easy to undo by accident:
+
+    1. NO ServiceControl Start="install". The MSI installs the service in the STOPPED
+       state. Reason: `ServiceControl` has no Condition attribute and MSI runs
+       StartServices BEFORE InstallFinalize, so "start it now" and "never start the new
+       binaries before the upgrade transaction commits" cannot both hold. Starting early
+       would let a new service migrate the database and then have the install roll back
+       to the old binaries, which can no longer read the new schema. Delayed Auto Start
+       means it comes up on the next boot; the README tells the user to run
+       `Start-Service PowerLease` if they do not want to wait.
+
+    2. Two install subdirectories, Service\ and Cli\. Both are self-contained .NET
+       publishes and therefore both carry a full runtime with identical file names
+       (coreclr.dll, hostfxr.dll, ...). Putting them in one directory collides.
+       Only Cli\ goes on PATH.
+
+    3. C:\ProgramData\PowerLease is created here as a PERMANENT component with an
+       explicit ACL, but config.json / the database / logs are NOT MSI-managed files.
+       The service creates those at first start, which is what makes "uninstall keeps
+       user configuration and history" true without any extra logic.
+  -->
+  <Package Name="PowerLease"
+           Manufacturer="PowerLease"
+           Version="$(var.ProductVersion)"
+           UpgradeCode="DE3BBD82-5E8E-40CD-B37F-CF06DA1476B5"
+           Scope="perMachine"
+           Compressed="yes"
+           InstallerVersion="500">
+
+    <SummaryInformation Description="PowerLease - keep-awake tool for remote Windows development machines" />
+
+    <!--
+      afterInstallInitialize removes the old version before the new files are laid down,
+      so the old service is stopped and removed rather than fighting the new one.
+    -->
+    <MajorUpgrade Schedule="afterInstallInitialize"
+                  DowngradeErrorMessage="A newer version of PowerLease is already installed. Uninstall it before installing this version." />
+
+    <MediaTemplate EmbedCab="yes" />
+
+    <!-- Administrator rights are required: this installs a per-machine Windows service. -->
+    <Launch Condition="Privileged" Message="PowerLease must be installed by an administrator." />
+
+    <!--
+      Opt-in data removal. Default (unset) keeps everything under ProgramData.
+      msiexec /x ... REMOVEUSERDATA=1  removes configuration, database and logs.
+      Secure="yes" is required for the value to survive elevation.
+    -->
+    <Property Id="REMOVEUSERDATA" Secure="yes" />
+
+    <!--
+      Keep this MSI out of Programs and Features so only the bundle is listed.
+      Two entries named PowerLease invites a user into uninstalling the inner package and
+      leaving the bundle registration behind, pointing at a product that is gone.
+
+      Visible="no" on the bundle's MsiPackage does NOT achieve this: the WiX linker only
+      READS ARPSYSTEMCOMPONENT out of the MSI's Property table for its own bookkeeping
+      (see ProcessMsiPackageCommand in WixToolset.Core.Burn), so hiding the package is the
+      MSI's own job.
+
+      Unconditional rather than conditional on BURNMSIINSTALL, because this MSI is not a
+      shipped artifact: releases contain the Setup EXE, the zip and SHA256SUMS, never the
+      bare MSI. Anyone who does install it directly can still uninstall with msiexec /x.
+    -->
+    <Property Id="ARPSYSTEMCOMPONENT" Value="1" />
+
+    <!--
+      Read back the data directory recorded at install time. AppSearch runs early enough that
+      the value is available to the deferred removal during an uninstall, which is not true of
+      a directory property.
+    -->
+    <Property Id="POWERLEASEDATADIR" Secure="yes">
+      <RegistrySearch Id="FindPowerLeaseDataDir"
+                      Root="HKLM"
+                      Key="SOFTWARE\PowerLease"
+                      Name="DataDirectory"
+                      Type="raw"
+                      Bitness="always64" />
+    </Property>
+
+    <Feature Id="FeatureService" Title="PowerLease Service" Level="1" AllowAbsent="no"
+             Description="Background Windows service that holds the keep-awake inhibit.">
+      <ComponentGroupRef Id="ServiceComponents" />
+      <ComponentGroupRef Id="DataDirectoryComponents" />
+      <ComponentGroupRef Id="DataPurgeComponents" />
+    </Feature>
+
+    <Feature Id="FeatureCli" Title="PowerLease CLI" Level="1"
+             Description="powerlease command-line tool, added to the system PATH.">
+      <ComponentGroupRef Id="CliComponents" />
+      <ComponentGroupRef Id="PathComponents" />
+    </Feature>
+
+    <!--
+      Placeholder for the WPF tray/dashboard app that arrives in stage 2. Level="0" keeps
+      it unselected and invisible today; adding components later does not disturb the
+      feature layout above, which matters because feature names are part of the upgrade
+      contract.
+    -->
+    <Feature Id="FeatureDesktop" Title="PowerLease Desktop" Level="0" AllowAbsent="yes"
+             Description="Tray icon and dashboard. Not part of this version." />
+
+  </Package>
+
+  <Fragment>
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="PowerLease">
+        <Directory Id="ServiceDir" Name="Service" />
+        <Directory Id="CliDir" Name="Cli" />
+      </Directory>
+    </StandardDirectory>
+
+    <StandardDirectory Id="CommonAppDataFolder">
+      <Directory Id="DataFolder" Name="PowerLease" />
+    </StandardDirectory>
+  </Fragment>
+
+  <Fragment>
+    <!--
+      The service executable gets its own component so ServiceInstall can attach to it.
+      Everything else in the publish tree is harvested, with the exe excluded so it is
+      not declared twice.
+    -->
+    <ComponentGroup Id="ServiceComponents" Directory="ServiceDir">
+      <Component Id="ServiceExecutable" Bitness="always64">
+        <File Id="PowerLeaseServiceExe"
+              Source="$(var.ServicePublishDir)PowerLease.Service.exe"
+              KeyPath="yes" />
+
+        <ServiceInstall Id="PowerLeaseServiceInstall"
+                        Name="PowerLease"
+                        DisplayName="PowerLease"
+                        Description="Holds a Windows power request while an SSH session, build or protected process is active, so the machine does not sleep."
+                        Type="ownProcess"
+                        Start="auto"
+                        ErrorControl="normal"
+                        Account="LocalSystem"
+                        Vital="yes">
+          <!--
+            Only the built-in ServiceConfig can set a startup type, and this is the one
+            attribute we need from it. It raises WIX1149; see installer/Directory.Build.props
+            for why that warning is suppressed rather than worked around.
+          -->
+          <ServiceConfig DelayedAutoStart="yes" OnInstall="yes" OnReinstall="yes" />
+
+          <!--
+            Failure actions, via the util extension because the built-in element cannot
+            express them. Without these a crash leaves the service stopped, the OS
+            reclaims the power request handle, and Windows is then free to sleep the
+            machine during an active SSH session, which is exactly the failure this
+            product exists to prevent. First restart has no delay to keep that window
+            short.
+          -->
+          <util:ServiceConfig FirstFailureActionType="restart"
+                              SecondFailureActionType="restart"
+                              ThirdFailureActionType="restart"
+                              RestartServiceDelayInSeconds="0"
+                              ResetPeriodInDays="1" />
+        </ServiceInstall>
+
+        <!--
+          Stop and remove only. See decision 1 at the top of this file for why the
+          service is deliberately not started by the installer.
+        -->
+        <ServiceControl Id="PowerLeaseServiceControl"
+                        Name="PowerLease"
+                        Stop="both"
+                        Remove="uninstall"
+                        Wait="yes" />
+      </Component>
+
+      <!--
+        Exclude is a child element with a Files attribute, not an attribute on Files.
+        The service executable is excluded here because it is declared explicitly above so
+        ServiceInstall can hang off its component; harvesting it again would declare it twice.
+      -->
+      <Files Include="$(var.ServicePublishDir)**">
+        <Exclude Files="$(var.ServicePublishDir)PowerLease.Service.exe" />
+      </Files>
+    </ComponentGroup>
+
+    <ComponentGroup Id="CliComponents" Directory="CliDir">
+      <Files Include="$(var.CliPublishDir)**" />
+    </ComponentGroup>
+
+    <ComponentGroup Id="PathComponents" Directory="CliDir">
+      <Component Id="CliOnPath" Guid="6A4F7456-672C-48A6-9D1E-B189E8E496A7" Bitness="always64">
+        <!-- Only Cli\ is exposed; Service\ stays off PATH so its runtime cannot shadow anything. -->
+        <Environment Id="PowerLeaseCliPath"
+                     Name="PATH"
+                     Value="[CliDir]"
+                     Action="set"
+                     Part="last"
+                     System="yes"
+                     Permanent="no" />
+      </Component>
+    </ComponentGroup>
+  </Fragment>
+
+  <Fragment>
+    <ComponentGroup Id="DataDirectoryComponents" Directory="DataFolder">
+      <!--
+        Permanent so uninstall leaves the directory (and therefore the user's config,
+        database and logs) in place. NeverOverwrite guards against an upgrade touching it.
+      -->
+      <Component Id="DataFolderComponent"
+                 Guid="0F838AB3-6F14-4D59-8D19-56C9F0D0D5AF"
+                 Permanent="yes"
+                 NeverOverwrite="yes"
+                 Bitness="always64">
+        <CreateFolder>
+          <!--
+            Explicit ACL rather than inheriting whatever ProgramData grants. The service
+            runs as LocalSystem and writes here; Administrators manage it; regular users
+            may read so `powerlease status` can be run unelevated, but may not write,
+            so a low-privilege user cannot plant a configuration file for a SYSTEM
+            process to read.
+          -->
+          <util:PermissionEx User="SYSTEM" GenericAll="yes" />
+          <util:PermissionEx User="Administrators" GenericAll="yes" />
+          <util:PermissionEx User="Users" GenericRead="yes" GenericExecute="yes" />
+        </CreateFolder>
+      </Component>
+    </ComponentGroup>
+
+    <!--
+      Opt-in wipe of everything under ProgramData, deliberately in its own NON-permanent
+      component.
+
+      The removal used to live in DataFolderComponent above, which is Permanent="yes" so that
+      an uninstall leaves the directory alone. A permanent component is never uninstalled, so
+      an On="uninstall" action inside it never fires and the switch silently did nothing.
+
+      The path comes from a registry value written at install time and read back by AppSearch,
+      not from [DataFolder]: directory properties are not reliably resolved for the deferred
+      custom action during an uninstall, whereas a registry search runs early and is exactly
+      what RemoveFolderEx expects.
+    -->
+    <ComponentGroup Id="DataPurgeComponents" Directory="ServiceDir">
+      <Component Id="DataPurgeComponent" Bitness="always64">
+        <RegistryValue Root="HKLM"
+                       Key="SOFTWARE\PowerLease"
+                       Name="DataDirectory"
+                       Type="string"
+                       Value="[DataFolder]"
+                       KeyPath="yes" />
+
+        <util:RemoveFolderEx Id="RemovePowerLeaseData"
+                             On="uninstall"
+                             Property="POWERLEASEDATADIR"
+                             Condition="REMOVEUSERDATA = 1" />
+      </Component>
+    </ComponentGroup>
+  </Fragment>
+
+</Wix>

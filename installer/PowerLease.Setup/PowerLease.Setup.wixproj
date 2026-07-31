@@ -1,0 +1,26 @@
+<Project Sdk="WixToolset.Sdk/6.0.2">
+
+  <PropertyGroup>
+    <OutputName>PowerLease</OutputName>
+    <OutputType>Package</OutputType>
+    <InstallerPlatform>x64</InstallerPlatform>
+
+    <!--
+      Paths to the published service and CLI trees. CI publishes both before building this
+      project and passes these in; the defaults let a developer build locally after running
+      the same two publishes by hand.
+    -->
+    <ServicePublishDir Condition="'$(ServicePublishDir)' == ''">$(MSBuildThisFileDirectory)..\..\artifacts\publish\Service\</ServicePublishDir>
+    <CliPublishDir Condition="'$(CliPublishDir)' == ''">$(MSBuildThisFileDirectory)..\..\artifacts\publish\Cli\</CliPublishDir>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="WixToolset.Util.wixext" />
+  </ItemGroup>
+
+  <!-- Surface the publish directories and product version to the compiler as preprocessor variables. -->
+  <PropertyGroup>
+    <DefineConstants>$(DefineConstants);ProductVersion=$(Version);ServicePublishDir=$(ServicePublishDir);CliPublishDir=$(CliPublishDir)</DefineConstants>
+  </PropertyGroup>
+
+</Project>

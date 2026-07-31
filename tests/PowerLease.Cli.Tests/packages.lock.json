@@ -163,7 +163,7 @@
           "xunit.v3.runner.common": "[3.2.2]"
         }
       },
-      "powerlease.cli": {
+      "powerlease": {
         "type": "Project",
         "dependencies": {
           "PowerLease.Ipc.Contracts": "[0.0.1, )",

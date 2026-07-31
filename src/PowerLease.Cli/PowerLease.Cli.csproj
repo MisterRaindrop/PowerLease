@@ -2,6 +2,14 @@
   <PropertyGroup>
     <OutputType>Exe</OutputType>
     <TargetFramework>net10.0</TargetFramework>
+
+    <!--
+      The command users are told to type is `powerlease`, so the executable has to be named
+      that. Without this the publish produces PowerLease.Cli.exe and the documented command
+      simply does not exist on PATH. RootNamespace is left alone, so the type is still
+      PowerLease.Cli.Program.
+    -->
+    <AssemblyName>powerlease</AssemblyName>
   </PropertyGroup>
 
   <ItemGroup>

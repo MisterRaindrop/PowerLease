@@ -1,0 +1,24 @@
+<Project Sdk="WixToolset.Sdk/6.0.2">
+
+  <PropertyGroup>
+    <!--
+      The released filename users download. Version is stamped in so a downloaded EXE is
+      self-identifying, which matters when someone reports a bug against "the installer".
+    -->
+    <OutputName>PowerLease-Setup-$(Version)-x64</OutputName>
+    <OutputType>Bundle</OutputType>
+    <InstallerPlatform>x64</InstallerPlatform>
+
+    <!-- CI passes this; the default matches where the MSI project writes its output. -->
+    <MsiPath Condition="'$(MsiPath)' == ''">$(MSBuildThisFileDirectory)..\PowerLease.Setup\bin\$(Configuration)\PowerLease.msi</MsiPath>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="WixToolset.BootstrapperApplications.wixext" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <DefineConstants>$(DefineConstants);ProductVersion=$(Version);MsiPath=$(MsiPath)</DefineConstants>
+  </PropertyGroup>
+
+</Project>

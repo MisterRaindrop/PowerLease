@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:bal="http://wixtoolset.org/schemas/v4/wxs/bal">
+
+  <!--
+    Burn bundle wrapping the MSI so users download one Setup EXE.
+
+    The UpgradeCode below is distinct from the MSI's on purpose: a bundle and the package it
+    carries are separately-upgradable products as far as Windows is concerned, and sharing one
+    code makes each look like an upgrade of the other. Like the MSI's, it must never change.
+  -->
+  <Bundle Name="PowerLease"
+          Version="$(var.ProductVersion)"
+          Manufacturer="PowerLease"
+          UpgradeCode="F645D949-F389-4F88-BBA4-A4D044809377"
+          Compressed="yes"
+          AboutUrl="https://github.com/MisterRaindrop/PowerLease">
+
+    <BootstrapperApplication>
+      <bal:WixStandardBootstrapperApplication
+        Theme="hyperlinkLicense"
+        LicenseUrl="https://github.com/MisterRaindrop/PowerLease/blob/main/LICENSE" />
+    </BootstrapperApplication>
+
+    <!--
+      Opt-in data removal, off by default. Overridable so it can be set on the command line:
+        PowerLease-Setup-X.Y.Z-x64.exe /uninstall /quiet REMOVEUSERDATA=1
+      Burn does not forward arbitrary command-line properties to chained MSIs, so this pairs
+      with the MsiProperty below; without that passthrough the switch is silently ignored.
+    -->
+    <Variable Name="REMOVEUSERDATA" Type="numeric" Value="0" bal:Overridable="yes" />
+
+    <Chain>
+      <!--
+        Vital so a failed MSI fails the bundle rather than reporting success over a broken
+        install. Compressed above embeds the MSI in the EXE, which is the point: one file to
+        download, no companion payloads to keep together.
+
+        Visible="no" keeps the MSI out of Programs and Features so only "PowerLease" (the
+        bundle) is listed. Two entries for one product invites a user into uninstalling the
+        inner package and leaving the bundle registration behind.
+
+        There is no DisplayInternalUI attribute in WiX 6: the bootstrapper application owns
+        the UI and Burn never shows the MSI's own dialogs, so the old attribute is gone
+        rather than renamed.
+      -->
+      <MsiPackage Id="PowerLeaseMsi"
+                  SourceFile="$(var.MsiPath)"
+                  Vital="yes"
+                  Visible="no">
+        <!-- The only way REMOVEUSERDATA reaches the MSI. See the Variable above. -->
+        <MsiProperty Name="REMOVEUSERDATA" Value="[REMOVEUSERDATA]" />
+      </MsiPackage>
+    </Chain>
+
+  </Bundle>
+
+</Wix>

@@ -1,0 +1,59 @@
+<Project>
+
+  <!--
+    Import the repository-wide props explicitly. MSBuild only applies the NEAREST
+    Directory.Build.props, so without this import the installer projects would silently
+    lose TreatWarningsAsErrors, Deterministic and the version/company metadata.
+
+    A plain relative path rather than $([MSBuild]::GetPathOfFileAbove(...)): that function
+    resolved to an empty string here (MSB4020), and installer/ is a direct child of the
+    repository root so the path is exact. If the folder ever moves this breaks loudly,
+    which is preferable to silently dropping the inherited settings.
+  -->
+  <Import Project="..\Directory.Build.props" />
+
+  <PropertyGroup>
+    <!--
+      WIX1149 fires on the built-in <ServiceConfig> element, whose remarks in the Windows
+      Installer SDK say it may "not [work] as expected", and suggests util:ServiceConfig
+      instead. That suggestion does not apply to our use: util:ServiceConfig cannot set a
+      startup type at all, so the built-in element is the only way to get
+      "Automatic (Delayed Start)" without shelling out to sc.exe from a custom action.
+      We use BOTH elements for their non-overlapping capabilities:
+        - built-in ServiceConfig -> DelayedAutoStart
+        - util:ServiceConfig     -> crash restart (failure actions)
+      Suppressed narrowly here rather than globally, and only because the repo sets
+      TreatWarningsAsErrors.
+    -->
+    <!--
+      WiX does not honour MSBuild's NoWarn; it has its own switch, which the SDK surfaces as
+      SuppressSpecificWarnings and which takes bare numbers with no "WIX" prefix.
+    -->
+    <SuppressSpecificWarnings>$(SuppressSpecificWarnings);1149</SuppressSpecificWarnings>
+
+    <!--
+      ICE60 fires for every file that carries a version resource but no language resource
+      and is not a companion file. A self-contained .NET publish contains a few hundred
+      such files (coreclr.dll, hostfxr.dll, clrjit.dll and friends), so this is inherent to
+      harvesting .NET output rather than a defect in this package.
+
+      It is safe here specifically because of how these files are serviced: they live in a
+      private application directory, are never shared, and MajorUpgrade replaces the whole
+      tree as a unit, so MSI's version+language file-replacement rules never arbitrate
+      between two candidates. Absent a language, MSI treats them as language-neutral, which
+      is what they are.
+    -->
+    <SuppressIces>$(SuppressIces);ICE60</SuppressIces>
+
+    <!--
+      No lock file for the installer projects. `dotnet restore` on a .wixproj hangs
+      indefinitely on macOS (the development machine here), so a lock file could never be
+      regenerated when a dependency changes. Committing one would be a promise we cannot
+      keep, and CI would then fail on a stale lock instead of on a real problem.
+      The actual inputs are still pinned: the toolset version lives in each .wixproj's Sdk
+      attribute and the extension versions in Directory.Packages.props.
+    -->
+    <RestorePackagesWithLockFile>false</RestorePackagesWithLockFile>
+  </PropertyGroup>
+
+</Project>
