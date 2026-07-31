@@ -54,10 +54,17 @@ function Invoke-Package {
 
 function Get-InstalledPowerLease {
     # Only the bundle should register in Programs and Features; the inner MSI is Visible="no".
+    #
+    # Plenty of uninstall keys have no DisplayName at all, and Set-StrictMode turns reading a
+    # missing property into a terminating error, so presence is checked before the comparison.
     @(Get-ChildItem 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall',
                     'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall' -ErrorAction SilentlyContinue |
         ForEach-Object { Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue } |
-        Where-Object { $_.DisplayName -eq 'PowerLease' })
+        Where-Object {
+            $_ -and
+            ($_.PSObject.Properties.Name -contains 'DisplayName') -and
+            $_.DisplayName -eq 'PowerLease'
+        })
 }
 
 function Get-InstalledPowerLeaseCount { (Get-InstalledPowerLease).Count }
@@ -65,7 +72,9 @@ function Get-InstalledPowerLeaseCount { (Get-InstalledPowerLease).Count }
 function Get-InstalledPowerLeaseVersion {
     $entries = Get-InstalledPowerLease
     if ($entries.Count -ne 1) { return $null }
-    $entries[0].DisplayVersion
+    $entry = $entries[0]
+    if ($entry.PSObject.Properties.Name -notcontains 'DisplayVersion') { return $null }
+    $entry.DisplayVersion
 }
 
 Write-Host "=== Preconditions ==="
