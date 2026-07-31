@@ -1,0 +1,166 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write        # create the release and upload assets
+  id-token: write        # build provenance attestation
+  attestations: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v5
+
+      # The tag is the single source of truth for the version. Directory.Build.props carries a
+      # development default; releasing must never silently ship that instead of the tag.
+      - name: Resolve version from tag
+        id: version
+        shell: pwsh
+        run: |
+          $tag = '${{ github.ref_name }}'
+          if ($tag -notmatch '^v(\d+\.\d+\.\d+)$') {
+            throw "Tag '$tag' is not of the form vMAJOR.MINOR.PATCH."
+          }
+          $version = $Matches[1]
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          # v0.x is not a supported release: unsigned, no GUI, and no automatic power
+          # management. Marking it prerelease keeps it out of "latest".
+          $pre = if ($version -like '0.*') { 'true' } else { 'false' }
+          "prerelease=$pre" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          Write-Host "version=$version prerelease=$pre"
+
+      - name: Restore
+        run: dotnet restore PowerLease.sln --locked-mode
+
+      - name: Build
+        run: dotnet build PowerLease.sln -c Release --no-restore -p:Version=${{ steps.version.outputs.version }}
+
+      # RealMachine tests need physical hardware; everything else must pass before shipping.
+      - name: Test
+        run: >-
+          dotnet test PowerLease.sln -c Release --no-build
+          --filter "Category!=RealMachine"
+
+      - name: Publish service and CLI
+        run: |
+          dotnet publish src/PowerLease.Service/PowerLease.Service.csproj -c Release -r win-x64 --self-contained true `
+            -p:Version=${{ steps.version.outputs.version }} -o artifacts/publish/Service
+          dotnet publish src/PowerLease.Cli/PowerLease.Cli.csproj -c Release -r win-x64 --self-contained true `
+            -p:Version=${{ steps.version.outputs.version }} -o artifacts/publish/Cli
+
+      # Authenticode signing is wired up but inert until a certificate exists. It must not fail
+      # the release, and it must not silently pretend the output is signed either: the summary
+      # below records which happened.
+      - name: Sign binaries
+        id: sign
+        if: ${{ secrets.SIGNING_CERTIFICATE != '' }}
+        shell: pwsh
+        run: |
+          throw 'Signing is not implemented yet. Remove this step guard when a certificate and a signing procedure exist.'
+
+      - name: Build MSI
+        run: >-
+          dotnet build installer/PowerLease.Setup/PowerLease.Setup.wixproj -c Release
+          -p:Version=${{ steps.version.outputs.version }}
+          -p:ServicePublishDir=${{ github.workspace }}\artifacts\publish\Service\
+          -p:CliPublishDir=${{ github.workspace }}\artifacts\publish\Cli\
+
+      - name: Build Setup EXE
+        run: >-
+          dotnet build installer/PowerLease.Bundle/PowerLease.Bundle.wixproj -c Release
+          -p:Version=${{ steps.version.outputs.version }}
+          -p:MsiPath=${{ github.workspace }}\installer\PowerLease.Setup\bin\Release\PowerLease.msi
+
+      # Ship nothing that has not installed and uninstalled cleanly on this very runner.
+      - name: Installer smoke test
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem "${{ github.workspace }}\installer\PowerLease.Bundle\bin\Release" -Filter 'PowerLease-Setup-*-x64.exe' -Recurse | Select-Object -First 1
+          if (-not $exe) { throw 'No Setup EXE was produced.' }
+          installer/tests/Invoke-InstallerSmokeTest.ps1 -BundlePath $exe.FullName
+
+      - name: Assemble release assets
+        id: assets
+        shell: pwsh
+        run: |
+          $version = '${{ steps.version.outputs.version }}'
+          $out = Join-Path '${{ github.workspace }}' 'artifacts/release'
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
+
+          $exe = Get-ChildItem "${{ github.workspace }}\installer\PowerLease.Bundle\bin\Release" -Filter "PowerLease-Setup-$version-x64.exe" -Recurse | Select-Object -First 1
+          if (-not $exe) { throw "Setup EXE for $version not found." }
+          Copy-Item $exe.FullName (Join-Path $out $exe.Name)
+
+          # The zip is for people who want the binaries without an installer: no service
+          # registration, no PATH entry, nothing per-machine.
+          $staging = Join-Path '${{ github.workspace }}' "artifacts/zip/PowerLease-$version-win-x64"
+          New-Item -ItemType Directory -Force -Path $staging | Out-Null
+          Copy-Item 'artifacts/publish/Service' (Join-Path $staging 'Service') -Recurse
+          Copy-Item 'artifacts/publish/Cli' (Join-Path $staging 'Cli') -Recurse
+          Compress-Archive -Path $staging -DestinationPath (Join-Path $out "PowerLease-$version-win-x64.zip")
+
+          # Hashes are computed over exactly the files being uploaded, in the same step, so the
+          # manifest cannot describe a different build than the assets do.
+          Push-Location $out
+          Get-ChildItem -File | Where-Object { $_.Name -ne 'SHA256SUMS.txt' } | ForEach-Object {
+            "$((Get-FileHash $_.Name -Algorithm SHA256).Hash.ToLower())  $($_.Name)"
+          } | Set-Content 'SHA256SUMS.txt' -Encoding ascii
+          Get-Content 'SHA256SUMS.txt' | ForEach-Object { Write-Host $_ }
+          Pop-Location
+
+      # Free, needs no certificate, and satisfies the spec's build-provenance requirement even
+      # though Authenticode signing cannot be done yet.
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            artifacts/release/PowerLease-Setup-*-x64.exe
+            artifacts/release/PowerLease-*-win-x64.zip
+
+      - name: Create GitHub release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $version = '${{ steps.version.outputs.version }}'
+          $signed = if ('${{ steps.sign.outcome }}' -eq 'success') { 'signed' } else { '**not signed**' }
+          $notes = @"
+PowerLease $version
+
+Artifacts are $signed. There is no code-signing certificate for this project yet, so
+SmartScreen will warn about an unknown publisher. Verify downloads against
+``SHA256SUMS.txt`` and the attached build provenance attestation.
+
+**This version keeps the machine awake; it never puts it to sleep.** Windows continues to
+sleep on idle according to your own power plan. There is no automatic sleep and no GUI.
+
+After installing, the service is registered but **stopped**. It starts on the next boot
+(Automatic, Delayed Start), or immediately with:
+
+``````
+Start-Service PowerLease
+``````
+
+See the README for why the installer deliberately does not start it.
+"@
+          $pre = if ('${{ steps.version.outputs.prerelease }}' -eq 'true') { '--prerelease' } else { '' }
+          $assets = (Get-ChildItem 'artifacts/release' -File | ForEach-Object { $_.FullName })
+          gh release create "${{ github.ref_name }}" @assets --title "PowerLease $version" --notes $notes $pre
+
+      - name: Upload build logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-logs
+          path: ${{ runner.temp }}/powerlease-*.log
+          if-no-files-found: ignore
