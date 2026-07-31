@@ -52,12 +52,20 @@ function Invoke-Package {
     }
 }
 
-function Get-InstalledPowerLeaseCount {
+function Get-InstalledPowerLease {
     # Only the bundle should register in Programs and Features; the inner MSI is Visible="no".
     @(Get-ChildItem 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall',
                     'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall' -ErrorAction SilentlyContinue |
         ForEach-Object { Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue } |
-        Where-Object { $_.DisplayName -eq 'PowerLease' }).Count
+        Where-Object { $_.DisplayName -eq 'PowerLease' })
+}
+
+function Get-InstalledPowerLeaseCount { (Get-InstalledPowerLease).Count }
+
+function Get-InstalledPowerLeaseVersion {
+    $entries = Get-InstalledPowerLease
+    if ($entries.Count -ne 1) { return $null }
+    $entries[0].DisplayVersion
 }
 
 Write-Host "=== Preconditions ==="
@@ -69,8 +77,10 @@ Write-Host "`n=== Install old version ==="
 Invoke-Package -Path $OldPackage -Arguments @() -LogName 'upgrade-install-old'
 Test-That 'service registered by old version' { $null -ne (Get-Service -Name $ServiceName -ErrorAction SilentlyContinue) }
 $oldCount = Get-InstalledPowerLeaseCount
-Write-Host "ARP entries named PowerLease after old install: $oldCount"
+$versionBefore = Get-InstalledPowerLeaseVersion
+Write-Host "ARP entries named PowerLease after old install: $oldCount (version $versionBefore)"
 Test-That 'exactly one product registered' { $oldCount -eq 1 }
+Test-That 'old version reports a version' { -not [string]::IsNullOrWhiteSpace($versionBefore) }
 
 # Stand-in for whatever the service will later write here. The point is that the upgrade must
 # not touch anything under ProgramData that the package does not own.
@@ -103,8 +113,13 @@ Test-That 'user data content is unchanged' {
 }
 Test-That 'log directory survived the upgrade' { Test-Path (Join-Path $logDir 'pretend.log') }
 
-Test-That 'upgraded version is the new one' {
-    (Get-Item "$InstallDir\Service\PowerLease.Service.exe").VersionInfo.FileVersion -ne $null
+# Without this the whole test could silently be comparing a package against itself: an
+# incremental build that skips relinking leaves the older content behind under a filename that
+# still claims the new version.
+$versionAfter = Get-InstalledPowerLeaseVersion
+Write-Host "registered version before upgrade: $versionBefore, after: $versionAfter"
+Test-That 'registered version actually changed' {
+    -not [string]::IsNullOrWhiteSpace($versionAfter) -and $versionAfter -ne $versionBefore
 }
 
 Write-Host "`n=== Uninstall the upgraded product ==="
