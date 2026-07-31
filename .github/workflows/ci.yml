@@ -146,6 +146,27 @@ jobs:
           Write-Host "Testing $($exe.FullName)"
           installer/tests/Invoke-InstallerSmokeTest.ps1 -BundlePath $exe.FullName
 
+      # Upgrade needs two versions. Building the same sources twice with different version
+      # numbers exercises the real MajorUpgrade path without depending on a published release.
+      - name: Build v0.0.2 package for the upgrade test
+        run: |
+          dotnet build installer/PowerLease.Setup/PowerLease.Setup.wixproj -c Release -p:Version=0.0.2 `
+            -p:ServicePublishDir="${{ github.workspace }}\artifacts\publish\Service\" `
+            -p:CliPublishDir="${{ github.workspace }}\artifacts\publish\Cli\" `
+            -p:BaseOutputPath="${{ github.workspace }}\artifacts\next\msi\"
+          dotnet build installer/PowerLease.Bundle/PowerLease.Bundle.wixproj -c Release -p:Version=0.0.2 `
+            -p:MsiPath="${{ github.workspace }}\artifacts\next\msi\Release\PowerLease.msi" `
+            -p:BaseOutputPath="${{ github.workspace }}\artifacts\next\bundle\"
+
+      - name: Upgrade and data-retention test
+        shell: pwsh
+        run: |
+          $old = Get-ChildItem "${{ github.workspace }}\installer\PowerLease.Bundle\bin\Release" -Filter 'PowerLease-Setup-0.0.1-x64.exe' -Recurse | Select-Object -First 1
+          $new = Get-ChildItem "${{ github.workspace }}\artifacts\next\bundle" -Filter 'PowerLease-Setup-0.0.2-x64.exe' -Recurse | Select-Object -First 1
+          if (-not $old) { throw 'v0.0.1 Setup EXE not found.' }
+          if (-not $new) { throw 'v0.0.2 Setup EXE not found.' }
+          installer/tests/Invoke-UpgradeTest.ps1 -OldPackage $old.FullName -NewPackage $new.FullName
+
       - name: Upload installer artifacts
         if: always()
         uses: actions/upload-artifact@v4
