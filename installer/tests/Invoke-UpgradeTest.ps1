@@ -165,17 +165,26 @@ Test-That 'registered version actually changed' {
     -not [string]::IsNullOrWhiteSpace($versionAfter) -and $versionAfter -ne $versionBefore
 }
 
-Write-Host "`n=== Uninstall the upgraded product ==="
+Write-Host "`n=== Uninstall the upgraded product (data must survive) ==="
 Invoke-Package -Path $NewPackage -Arguments @('/uninstall') -LogName 'upgrade-uninstall'
 Test-That 'service deregistered' { -not (Get-Service -Name $ServiceName -ErrorAction SilentlyContinue) }
 Test-That 'no product left registered' { (Get-InstalledPowerLeaseCount) -eq 0 }
-Test-That 'user data still survives uninstall' { Test-Path -LiteralPath $marker }
+Test-That 'user data still survives a plain uninstall' { Test-Path -LiteralPath $marker }
 
-Write-Host "`n=== Explicit data removal ==="
-# REMOVEUSERDATA is the opt-in escape hatch. It has to be passed to the MSI, so it goes through
-# the bundle's MSI argument passthrough.
-Invoke-Package -Path $NewPackage -Arguments @('/uninstall', 'REMOVEUSERDATA=1') -LogName 'upgrade-uninstall-purge'
-Write-Host "DataDir present after purge attempt: $(Test-Path $DataDir)"
+# REMOVEUSERDATA has to be passed to an uninstall that actually runs, so the product is
+# reinstalled first. Passing it to a second uninstall of an already-absent product would be a
+# no-op and the assertion would pass without proving anything.
+Write-Host "`n=== Reinstall, then uninstall with REMOVEUSERDATA=1 (data must go) ==="
+Invoke-Package -Path $NewPackage -Arguments @() -LogName 'purge-install'
+Test-That 'reinstalled over surviving data' { Test-Path -LiteralPath $marker }
+
+Invoke-Package -Path $NewPackage -Arguments @('/uninstall', 'REMOVEUSERDATA=1') -LogName 'purge-uninstall'
+Write-Host "DataDir present after purge: $(Test-Path $DataDir)"
+if (Test-Path $DataDir) {
+    Get-ChildItem $DataDir -Recurse -Force | ForEach-Object { Write-Host "    leftover: $($_.FullName)" }
+}
+Test-That 'user data removed when REMOVEUSERDATA=1' { -not (Test-Path -LiteralPath $marker) }
+Test-That 'data directory removed when REMOVEUSERDATA=1' { -not (Test-Path -LiteralPath $DataDir) }
 
 Write-Host "`n=== Result ==="
 if ($script:Failures.Count -gt 0) {

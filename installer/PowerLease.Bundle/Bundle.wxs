@@ -22,6 +22,14 @@
         LicenseUrl="https://github.com/MisterRaindrop/PowerLease/blob/main/LICENSE" />
     </BootstrapperApplication>
 
+    <!--
+      Opt-in data removal, off by default. Overridable so it can be set on the command line:
+        PowerLease-Setup-X.Y.Z-x64.exe /uninstall /quiet REMOVEUSERDATA=1
+      Burn does not forward arbitrary command-line properties to chained MSIs, so this pairs
+      with the MsiProperty below; without that passthrough the switch is silently ignored.
+    -->
+    <Variable Name="REMOVEUSERDATA" Type="numeric" Value="0" bal:Overridable="yes" />
+
     <Chain>
       <!--
         Vital so a failed MSI fails the bundle rather than reporting success over a broken
@@ -39,7 +47,10 @@
       <MsiPackage Id="PowerLeaseMsi"
                   SourceFile="$(var.MsiPath)"
                   Vital="yes"
-                  Visible="no" />
+                  Visible="no">
+        <!-- The only way REMOVEUSERDATA reaches the MSI. See the Variable above. -->
+        <MsiProperty Name="REMOVEUSERDATA" Value="[REMOVEUSERDATA]" />
+      </MsiPackage>
     </Chain>
 
   </Bundle>
