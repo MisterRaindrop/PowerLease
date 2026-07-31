@@ -17,6 +17,7 @@
           "PowerLease.Domain": "[0.0.1, )"
         }
       }
-    }
+    },
+    "net10.0/win-x64": {}
   }
 }
