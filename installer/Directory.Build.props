@@ -3,10 +3,14 @@
   <!--
     Import the repository-wide props explicitly. MSBuild only applies the NEAREST
     Directory.Build.props, so without this import the installer projects would silently
-    lose TreatWarningsAsErrors, Deterministic, RestorePackagesWithLockFile and the
-    version/company metadata.
+    lose TreatWarningsAsErrors, Deterministic and the version/company metadata.
+
+    A plain relative path rather than $([MSBuild]::GetPathOfFileAbove(...)): that function
+    resolved to an empty string here (MSB4020), and installer/ is a direct child of the
+    repository root so the path is exact. If the folder ever moves this breaks loudly,
+    which is preferable to silently dropping the inherited settings.
   -->
-  <Import Project="$([MSBuild]::GetPathOfFileAbove($(MSBuildThisFileFile), $(MSBuildThisFileDirectory)..))" />
+  <Import Project="..\Directory.Build.props" />
 
   <PropertyGroup>
     <!--
