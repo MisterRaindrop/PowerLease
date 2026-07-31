@@ -1,0 +1,27 @@
+# Line endings must be deterministic on every platform and must agree with the
+# `end_of_line = lf` declared in .editorconfig.
+#
+# Without this file, git on a Windows runner checks text files out as CRLF
+# (core.autocrlf), so `dotnet format --verify-no-changes` passes on Linux/macOS
+# and fails on Windows with hundreds of ENDOFLINE errors. eol=lf keeps the
+# working tree on LF as well.
+#
+# LF everywhere, including .sln and any future .ps1 -- no per-type CRLF
+# exception, because an exception would just disagree with .editorconfig again.
+* text=auto eol=lf
+
+# Binary files: exclude from any line-ending or encoding conversion
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pdf binary
+*.zip binary
+*.exe binary
+*.dll binary
+*.pdb binary
+*.msi binary
+*.snk binary
+*.pfx binary
+*.docx binary

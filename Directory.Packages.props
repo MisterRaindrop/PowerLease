@@ -1,0 +1,36 @@
+<Project>
+  <PropertyGroup>
+    <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
+    <!-- Required so a transitive dependency can be pinned to a patched version;
+         see SQLitePCLRaw.lib.e_sqlite3 below. -->
+    <CentralPackageTransitivePinningEnabled>true</CentralPackageTransitivePinningEnabled>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageVersion Include="xunit.v3" Version="3.2.2" />
+    <PackageVersion Include="xunit.runner.visualstudio" Version="3.1.5" />
+    <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="18.8.1" />
+    <PackageVersion Include="coverlet.collector" Version="10.0.1" />
+    <PackageVersion Include="Microsoft.Extensions.Hosting" Version="10.0.10" />
+    <PackageVersion Include="Microsoft.Extensions.Hosting.WindowsServices" Version="10.0.10" />
+    <PackageVersion Include="Microsoft.Data.Sqlite" Version="10.0.10" />
+    <PackageVersion Include="System.CommandLine" Version="2.0.10" />
+  </ItemGroup>
+  <ItemGroup>
+    <!--
+      Security pin, not a casual upgrade.
+
+      Microsoft.Data.Sqlite 10.0.10 (the latest release) resolves
+      SQLitePCLRaw.lib.e_sqlite3 2.1.11, which carries the known high-severity
+      advisory GHSA-2m69-gcr7-jv3q. Combined with the repo-wide
+      TreatWarningsAsErrors, NU1903 turns that into a restore failure.
+      2.1.12 is patched.
+
+      Silencing it with <NoWarn>NU1903</NoWarn> or <NuGetAudit>false</NuGetAudit>
+      would hide a real vulnerability shipped inside a Windows Service that runs
+      as SYSTEM, so neither is acceptable here.
+
+      Remove this pin once Microsoft.Data.Sqlite ships a patched dependency.
+    -->
+    <PackageVersion Include="SQLitePCLRaw.lib.e_sqlite3" Version="2.1.12" />
+  </ItemGroup>
+</Project>

@@ -1,0 +1,17 @@
+# Local-only project design documents
+/Docs/
+
+# Build outputs
+bin/
+obj/
+artifacts/
+TestResults/
+
+# User and IDE files
+*.user
+*.suo
+.vs/
+.idea/
+
+# Snapshot testing artifacts
+*.received.*
