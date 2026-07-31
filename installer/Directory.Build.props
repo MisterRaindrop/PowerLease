@@ -1,0 +1,37 @@
+<Project>
+
+  <!--
+    Import the repository-wide props explicitly. MSBuild only applies the NEAREST
+    Directory.Build.props, so without this import the installer projects would silently
+    lose TreatWarningsAsErrors, Deterministic, RestorePackagesWithLockFile and the
+    version/company metadata.
+  -->
+  <Import Project="$([MSBuild]::GetPathOfFileAbove($(MSBuildThisFileFile), $(MSBuildThisFileDirectory)..))" />
+
+  <PropertyGroup>
+    <!--
+      WIX1149 fires on the built-in <ServiceConfig> element, whose remarks in the Windows
+      Installer SDK say it may "not [work] as expected", and suggests util:ServiceConfig
+      instead. That suggestion does not apply to our use: util:ServiceConfig cannot set a
+      startup type at all, so the built-in element is the only way to get
+      "Automatic (Delayed Start)" without shelling out to sc.exe from a custom action.
+      We use BOTH elements for their non-overlapping capabilities:
+        - built-in ServiceConfig -> DelayedAutoStart
+        - util:ServiceConfig     -> crash restart (failure actions)
+      Suppressed narrowly here rather than globally, and only because the repo sets
+      TreatWarningsAsErrors.
+    -->
+    <NoWarn>$(NoWarn);WIX1149</NoWarn>
+
+    <!--
+      No lock file for the installer projects. `dotnet restore` on a .wixproj hangs
+      indefinitely on macOS (the development machine here), so a lock file could never be
+      regenerated when a dependency changes -- committing one would be a promise we cannot
+      keep, and CI would then fail on a stale lock instead of on a real problem.
+      The actual inputs are still pinned: the toolset version lives in each .wixproj's Sdk
+      attribute and the extension versions in Directory.Packages.props.
+    -->
+    <RestorePackagesWithLockFile>false</RestorePackagesWithLockFile>
+  </PropertyGroup>
+
+</Project>

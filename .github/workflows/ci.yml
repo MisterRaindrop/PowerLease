@@ -78,3 +78,45 @@ jobs:
         with:
           name: windows-test-results
           path: TestResults
+
+  installer:
+    runs-on: windows-latest
+    needs: build-test
+    timeout-minutes: 25
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v5
+
+      # Service and CLI are published separately into their own directories. Both are
+      # self-contained, so they each carry a full runtime with identical file names and
+      # would collide if installed into one folder.
+      - name: Publish service
+        run: >-
+          dotnet publish src/PowerLease.Service/PowerLease.Service.csproj
+          -c Release -r win-x64 --self-contained true
+          -o artifacts/publish/Service
+
+      - name: Publish CLI
+        run: >-
+          dotnet publish src/PowerLease.Cli/PowerLease.Cli.csproj
+          -c Release -r win-x64 --self-contained true
+          -o artifacts/publish/Cli
+
+      - name: Build MSI
+        run: >-
+          dotnet build installer/PowerLease.Setup/PowerLease.Setup.wixproj
+          -c Release
+          -p:ServicePublishDir=${{ github.workspace }}\artifacts\publish\Service\
+          -p:CliPublishDir=${{ github.workspace }}\artifacts\publish\Cli\
+
+      - name: Upload installer artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: installer
+          path: |
+            installer/PowerLease.Setup/bin/**/*.msi
+            installer/PowerLease.Bundle/bin/**/*.exe
