@@ -55,6 +55,22 @@
     -->
     <Property Id="REMOVEUSERDATA" Secure="yes" />
 
+    <!--
+      Keep this MSI out of Programs and Features so only the bundle is listed.
+      Two entries named PowerLease invites a user into uninstalling the inner package and
+      leaving the bundle registration behind, pointing at a product that is gone.
+
+      Visible="no" on the bundle's MsiPackage does NOT achieve this: the WiX linker only
+      READS ARPSYSTEMCOMPONENT out of the MSI's Property table for its own bookkeeping
+      (see ProcessMsiPackageCommand in WixToolset.Core.Burn), so hiding the package is the
+      MSI's own job.
+
+      Unconditional rather than conditional on BURNMSIINSTALL, because this MSI is not a
+      shipped artifact: releases contain the Setup EXE, the zip and SHA256SUMS, never the
+      bare MSI. Anyone who does install it directly can still uninstall with msiexec /x.
+    -->
+    <Property Id="ARPSYSTEMCOMPONENT" Value="1" />
+
     <Feature Id="FeatureService" Title="PowerLease Service" Level="1" AllowAbsent="no"
              Description="Background Windows service that holds the keep-awake inhibit.">
       <ComponentGroupRef Id="ServiceComponents" />

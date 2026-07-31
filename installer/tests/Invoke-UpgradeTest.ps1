@@ -57,14 +57,34 @@ function Get-InstalledPowerLease {
     #
     # Plenty of uninstall keys have no DisplayName at all, and Set-StrictMode turns reading a
     # missing property into a terminating error, so presence is checked before the comparison.
-    @(Get-ChildItem 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall',
-                    'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall' -ErrorAction SilentlyContinue |
-        ForEach-Object { Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue } |
-        Where-Object {
-            $_ -and
-            ($_.PSObject.Properties.Name -contains 'DisplayName') -and
-            $_.DisplayName -eq 'PowerLease'
-        })
+    try {
+        @(Get-ChildItem 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall',
+                        'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall' -ErrorAction SilentlyContinue |
+            ForEach-Object { Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue } |
+            Where-Object {
+                $_ -and
+                ($_.PSObject.Properties.Name -contains 'DisplayName') -and
+                $_.DisplayName -eq 'PowerLease'
+            })
+    }
+    catch {
+        # Registry keys can vanish mid-enumeration right after an uninstall.
+        Write-Host "  (registry enumeration raised: $($_.Exception.Message))"
+        @()
+    }
+}
+
+function Write-PowerLeaseRegistrations {
+    param([string] $When)
+    $entries = Get-InstalledPowerLease
+    Write-Host "ARP entries named PowerLease $When : $($entries.Count)"
+    foreach ($e in $entries) {
+        $ver = if ($e.PSObject.Properties.Name -contains 'DisplayVersion') { $e.DisplayVersion } else { '<none>' }
+        $un = if ($e.PSObject.Properties.Name -contains 'UninstallString') { $e.UninstallString } else { '<none>' }
+        $sys = if ($e.PSObject.Properties.Name -contains 'SystemComponent') { $e.SystemComponent } else { '<unset>' }
+        Write-Host "    version=$ver systemComponent=$sys"
+        Write-Host "    uninstall=$un"
+    }
 }
 
 function Get-InstalledPowerLeaseCount { (Get-InstalledPowerLease).Count }
@@ -85,9 +105,9 @@ Test-That 'new package exists' { Test-Path -LiteralPath $NewPackage }
 Write-Host "`n=== Install old version ==="
 Invoke-Package -Path $OldPackage -Arguments @() -LogName 'upgrade-install-old'
 Test-That 'service registered by old version' { $null -ne (Get-Service -Name $ServiceName -ErrorAction SilentlyContinue) }
+Write-PowerLeaseRegistrations 'after installing the old version'
 $oldCount = Get-InstalledPowerLeaseCount
 $versionBefore = Get-InstalledPowerLeaseVersion
-Write-Host "ARP entries named PowerLease after old install: $oldCount (version $versionBefore)"
 Test-That 'exactly one product registered' { $oldCount -eq 1 }
 Test-That 'old version reports a version' { -not [string]::IsNullOrWhiteSpace($versionBefore) }
 
@@ -109,8 +129,8 @@ Test-That 'service still registered after upgrade' { $null -ne (Get-Service -Nam
 Test-That 'service executable still present' { Test-Path "$InstallDir\Service\PowerLease.Service.exe" }
 Test-That 'CLI still present' { Test-Path "$InstallDir\Cli\powerlease.exe" }
 
+Write-PowerLeaseRegistrations 'after the upgrade'
 $newCount = Get-InstalledPowerLeaseCount
-Write-Host "ARP entries named PowerLease after upgrade: $newCount"
 # MajorUpgrade scheduled afterInstallInitialize must have removed the old product. Two entries
 # would mean the upgrade installed alongside instead of replacing, which is what a changed
 # UpgradeCode looks like from the outside.
