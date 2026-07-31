@@ -19,6 +19,8 @@ public sealed class PowerLeasePathsTests
         {
             (paths.Root, root),
             (paths.ConfigFilePath, Path.Combine(root, "config.json")),
+            (paths.LastGoodConfigFilePath, Path.Combine(root, "config.last-good.json")),
+            (paths.ConfigTempFilePath, Path.Combine(root, "config.json.tmp")),
             (paths.DatabasePath, Path.Combine(root, "data", "powerlease.db")),
             (paths.LogsDirectory, Path.Combine(root, "logs")),
             (paths.LockFilePath, Path.Combine(root, "keep-awake.lock")),
@@ -87,5 +89,22 @@ public sealed class PowerLeasePathsTests
 
         Assert.Equal("keep-awake.lock", Path.GetFileName(paths.LockFilePath));
         Assert.Equal(root, Path.GetDirectoryName(paths.LockFilePath));
+    }
+
+    /// <summary>
+    /// The three configuration paths have to be distinct files in the same directory: the atomic replace
+    /// that installs a new configuration moves the temporary file into place and the file it displaces
+    /// out to the last-good name, and a rename is only atomic within one volume.
+    /// </summary>
+    [Fact]
+    public void The_three_configuration_paths_are_distinct_files_beside_each_other()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "powerlease-tests", Guid.NewGuid().ToString("n"));
+
+        var paths = new PowerLeasePaths(root);
+
+        var configPaths = new[] { paths.ConfigFilePath, paths.LastGoodConfigFilePath, paths.ConfigTempFilePath };
+        Assert.Equal(3, configPaths.Distinct(StringComparer.Ordinal).Count());
+        Assert.All(configPaths, path => Assert.Equal(root, Path.GetDirectoryName(path)));
     }
 }
