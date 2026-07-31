@@ -120,6 +120,15 @@ jobs:
           -p:ServicePublishDir=${{ github.workspace }}\artifacts\publish\Service\
           -p:CliPublishDir=${{ github.workspace }}\artifacts\publish\Cli\
 
+      # The only place the installer's behaviour is actually verified. Every claim the MSI
+      # makes about the service, PATH and ProgramData is unproven until this runs, because
+      # the development machine for this project is macOS.
+      - name: Installer smoke test
+        shell: pwsh
+        run: >-
+          installer/tests/Invoke-InstallerSmokeTest.ps1
+          -MsiPath "${{ github.workspace }}\installer\PowerLease.Setup\bin\Release\PowerLease.msi"
+
       - name: Upload installer artifacts
         if: always()
         uses: actions/upload-artifact@v4
@@ -128,3 +137,11 @@ jobs:
           path: |
             installer/PowerLease.Setup/bin/**/*.msi
             installer/PowerLease.Bundle/bin/**/*.exe
+
+      - name: Upload msiexec logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: msiexec-logs
+          path: ${{ runner.temp }}/powerlease-*.log
+          if-no-files-found: ignore
