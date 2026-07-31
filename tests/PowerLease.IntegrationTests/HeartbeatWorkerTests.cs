@@ -42,8 +42,11 @@ public sealed class HeartbeatWorkerTests
 
     private static async Task StopWorkerAsync(HeartbeatWorker worker)
     {
-        using var timeoutSource = new CancellationTokenSource(TimeSpan.FromSeconds(1));
-        await worker.StopAsync(timeoutSource.Token);
+        // No timeout token. StopAsync returns when either the worker finishes or the token fires, so a timeout on
+        // a loaded runner would return while the worker was still unwinding -- and the count read afterwards
+        // could then pick up one more heartbeat, failing a green build and blaming the product. The token passed
+        // to ExecuteAsync is already cancelled by the caller, so this cannot hang on this worker.
+        await worker.StopAsync(CancellationToken.None);
     }
 
     private static async Task WaitForHeartbeatsAsync(

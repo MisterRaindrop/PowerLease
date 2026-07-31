@@ -23,7 +23,7 @@ public sealed class SqliteHistoryStoreTests
         var lease = fixture.Lease();
 
         fixture.Store.UpsertLease(lease);
-        var loaded = Assert.Single(fixture.Store.LoadLeases());
+        var loaded = Assert.Single(fixture.Store.LoadLeases().Leases);
 
         Assert.Equal(lease.Id, loaded.Id);
         Assert.Equal(lease.Source, loaded.Source);
@@ -52,7 +52,7 @@ public sealed class SqliteHistoryStoreTests
         using var fixture = new HistoryFixture();
         fixture.Store.UpsertLease(fixture.Lease());
 
-        var loaded = Assert.Single(fixture.Store.LoadLeases());
+        var loaded = Assert.Single(fixture.Store.LoadLeases().Leases);
         var resumed = LeaseDeadline.Resume(
             loaded.TryGetCheckpoint(),
             loaded.OriginalDuration,
@@ -78,7 +78,7 @@ public sealed class SqliteHistoryStoreTests
             RemainingAtCheckpoint = TimeSpan.FromMinutes(30)
         });
 
-        var loaded = Assert.Single(fixture.Store.LoadLeases());
+        var loaded = Assert.Single(fixture.Store.LoadLeases().Leases);
         Assert.Equal(LeaseStatus.Released, loaded.Status);
         Assert.Equal("released by liu", loaded.EndReason);
         Assert.Equal(TimeSpan.FromMinutes(30), loaded.RemainingAtCheckpoint);
@@ -91,9 +91,9 @@ public sealed class SqliteHistoryStoreTests
         fixture.Store.UpsertLease(fixture.Lease("active-1"));
         fixture.Store.UpsertLease(fixture.Lease("ended-1", LeaseStatus.Expired));
 
-        Assert.Equal("active-1", Assert.Single(fixture.Store.LoadLeases(LeaseStatus.Active)).Id);
-        Assert.Equal("ended-1", Assert.Single(fixture.Store.LoadLeases(LeaseStatus.Expired)).Id);
-        Assert.Equal(2, fixture.Store.LoadLeases().Count);
+        Assert.Equal("active-1", Assert.Single(fixture.Store.LoadLeases(LeaseStatus.Active).Leases).Id);
+        Assert.Equal("ended-1", Assert.Single(fixture.Store.LoadLeases(LeaseStatus.Expired).Leases).Id);
+        Assert.Equal(2, fixture.Store.LoadLeases().Leases.Count);
     }
 
     [Fact]
@@ -205,7 +205,7 @@ public sealed class SqliteHistoryStoreTests
             transaction.UpsertLease(fixture.Lease());
         }
 
-        Assert.Empty(fixture.Store.LoadLeases());
+        Assert.Empty(fixture.Store.LoadLeases().Leases);
     }
 
     [Fact]
@@ -225,7 +225,7 @@ public sealed class SqliteHistoryStoreTests
 
         Assert.False(fixture.Store.IsProcessed("openssh", "4242"));
         Assert.Null(fixture.Store.GetBookmark("openssh"));
-        Assert.Empty(fixture.Store.LoadLeases());
+        Assert.Empty(fixture.Store.LoadLeases().Leases);
 
         using (var committed = fixture.Store.BeginTransaction())
         {
@@ -237,7 +237,7 @@ public sealed class SqliteHistoryStoreTests
 
         Assert.True(fixture.Store.IsProcessed("openssh", "4242"));
         Assert.Equal("offset-100", fixture.Store.GetBookmark("openssh"));
-        Assert.Single(fixture.Store.LoadLeases());
+        Assert.Single(fixture.Store.LoadLeases().Leases);
     }
 
     [Fact]

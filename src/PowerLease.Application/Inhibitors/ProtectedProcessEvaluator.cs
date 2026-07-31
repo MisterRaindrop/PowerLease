@@ -70,6 +70,7 @@ public sealed class ProtectedProcessEvaluator
         }
 
         var inhibitors = new List<Inhibitor>();
+        var unreadable = new List<string>();
 
         foreach (var process in snapshot.Processes)
         {
@@ -90,11 +91,11 @@ public sealed class ProtectedProcessEvaluator
 
             if (process.CommandLine is not { } commandLine)
             {
-                inhibitors.Add(new Inhibitor(
-                    InhibitorKind.ProtectedProcess,
-                    $"The command line of '{process.Name}' could not be read, so it is treated as a match",
-                    nowUtc,
-                    $"{process.Name}:{process.ProcessId}"));
+                // Collected rather than turned into an inhibitor each. A service reading other accounts'
+                // processes cannot read most command lines, so this is the ordinary case: one inhibitor per
+                // process would mean hundreds of allocations and a full sort every cycle, and a status output
+                // in which the reason someone is actually looking for is buried.
+                unreadable.Add($"{process.Name}:{process.ProcessId}");
                 continue;
             }
 
@@ -109,6 +110,19 @@ public sealed class ProtectedProcessEvaluator
                     nowUtc,
                     $"{process.Name}:{process.ProcessId}"));
             }
+        }
+
+        if (unreadable.Count > 0)
+        {
+            var listed = string.Join(", ", unreadable.Take(3));
+            var more = unreadable.Count > 3 ? $" and {unreadable.Count - 3} more" : string.Empty;
+
+            inhibitors.Add(new Inhibitor(
+                InhibitorKind.ProtectedProcess,
+                $"The command line of {unreadable.Count} process(es) could not be read, so they are treated " +
+                "as matches",
+                nowUtc,
+                listed + more));
         }
 
         return inhibitors.Count == 0

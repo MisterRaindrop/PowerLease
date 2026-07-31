@@ -22,7 +22,6 @@ public sealed class HistoryTransaction : IDisposable
 {
     private readonly SqliteConnection _connection;
     private readonly SqliteTransaction _transaction;
-    private bool _committed;
 
     internal HistoryTransaction(SqliteConnection connection)
     {
@@ -30,19 +29,13 @@ public sealed class HistoryTransaction : IDisposable
         _transaction = connection.BeginTransaction();
     }
 
-    public void Commit()
-    {
-        _transaction.Commit();
-        _committed = true;
-    }
+    public void Commit() => _transaction.Commit();
 
     public void Dispose()
     {
-        if (!_committed)
-        {
-            _transaction.Rollback();
-        }
-
+        // No explicit rollback. Disposing an uncommitted transaction already rolls it back, while calling
+        // Rollback() throws if the transaction has completed or the connection has since been closed -- and an
+        // exception thrown from Dispose replaces whatever real exception was unwinding through the using block.
         _transaction.Dispose();
     }
 

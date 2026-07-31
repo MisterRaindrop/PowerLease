@@ -140,10 +140,14 @@ internal sealed class KernelHarness
         _sequences[sourceId] = 0;
     }
 
-    public void ReplaceConfiguration()
+    /// <param name="expectedSources">
+    /// What the host will run from now on. Defaults to what it ran before, so a test that only cares about the
+    /// generation does not have to restate it.
+    /// </param>
+    public void ReplaceConfiguration(IReadOnlyList<string>? expectedSources = null)
     {
         ConfigGeneration++;
-        Kernel.Apply(new ConfigurationReplaced(ConfigGeneration));
+        Kernel.Apply(new ConfigurationReplaced(ConfigGeneration, expectedSources ?? Options.ExpectedSources));
     }
 
     public KernelStepResult Step() => Kernel.Step();

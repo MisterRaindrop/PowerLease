@@ -56,7 +56,21 @@ public sealed class SqliteHistoryStore : IDisposable
 
     public void UpsertLease(KeepAwakeLease lease) => InOwnTransaction(tx => tx.UpsertLease(lease));
 
-    public IReadOnlyList<KeepAwakeLease> LoadLeases(LeaseStatus? status = null)
+    /// <summary>
+    /// Read the leases.
+    /// <para>
+    /// A row that cannot be mapped is skipped rather than allowed to throw. This runs on the startup path, and
+    /// a single unreadable record must not make every lease unloadable: that would leave the service unable to
+    /// start and the machine unprotected for as long as it kept restarting. It is reachable without any
+    /// corruption -- a downgrade after a later version adds a lease source leaves rows this build cannot map,
+    /// and the schema version is unchanged so the migration check does not catch it.
+    /// </para>
+    /// <para>
+    /// Skipping alone would not be safe, because a skipped lease is protection quietly lost. The identifiers are
+    /// returned alongside so the caller can latch a fault, which holds the machine awake.
+    /// </para>
+    /// </summary>
+    public LeaseLoadResult LoadLeases(LeaseStatus? status = null)
     {
         using var command = _connection.CreateCommand();
         command.CommandText = """
@@ -71,34 +85,49 @@ public sealed class SqliteHistoryStore : IDisposable
         command.Parameters.AddWithValue("$status", status?.ToString() ?? (object)DBNull.Value);
 
         var leases = new List<KeepAwakeLease>();
+        var unreadable = new List<string>();
         using var reader = command.ExecuteReader();
         while (reader.Read())
         {
-            leases.Add(new KeepAwakeLease
+            var id = reader.IsDBNull(0) ? "(no identifier)" : reader.GetString(0);
+
+            try
             {
-                Id = reader.GetString(0),
-                Source = Enum.Parse<LeaseSource>(reader.GetString(1)),
-                Reason = TextOrNull(reader, 2),
-                OwnerUser = TextOrNull(reader, 3),
-                RemoteIp = TextOrNull(reader, 4),
-                ProcessId = reader.IsDBNull(5) ? null : reader.GetInt32(5),
-                ProcessName = TextOrNull(reader, 6),
-                StartedAtUtc = Timestamps.Parse(reader.GetString(7)),
-                ExpiresAtUtc = Timestamps.ParseOrNull(TextOrNull(reader, 8)),
-                LastRenewedAtUtc = Timestamps.ParseOrNull(TextOrNull(reader, 9)),
-                AutoRenew = reader.GetInt32(10) != 0,
-                Status = Enum.Parse<LeaseStatus>(reader.GetString(11)),
-                EndedAtUtc = Timestamps.ParseOrNull(TextOrNull(reader, 12)),
-                EndReason = TextOrNull(reader, 13),
-                EpochId = Guid.Parse(reader.GetString(14)),
-                OriginalDuration = TimeSpan.FromSeconds(reader.GetDouble(15)),
-                LastRenewDuration = SecondsOrNull(reader, 16),
-                RemainingAtCheckpoint = SecondsOrNull(reader, 17),
-                CheckpointUtc = Timestamps.ParseOrNull(TextOrNull(reader, 18))
-            });
+                leases.Add(MapLease(reader));
+            }
+            catch (Exception error) when (error is ArgumentException or FormatException or InvalidCastException)
+            {
+                unreadable.Add($"{id}: {error.Message}");
+            }
         }
 
-        return leases;
+        return new LeaseLoadResult(leases, unreadable);
+    }
+
+    private static KeepAwakeLease MapLease(SqliteDataReader reader)
+    {
+        return new KeepAwakeLease
+        {
+            Id = reader.GetString(0),
+            Source = Enum.Parse<LeaseSource>(reader.GetString(1)),
+            Reason = TextOrNull(reader, 2),
+            OwnerUser = TextOrNull(reader, 3),
+            RemoteIp = TextOrNull(reader, 4),
+            ProcessId = reader.IsDBNull(5) ? null : reader.GetInt32(5),
+            ProcessName = TextOrNull(reader, 6),
+            StartedAtUtc = Timestamps.Parse(reader.GetString(7)),
+            ExpiresAtUtc = Timestamps.ParseOrNull(TextOrNull(reader, 8)),
+            LastRenewedAtUtc = Timestamps.ParseOrNull(TextOrNull(reader, 9)),
+            AutoRenew = reader.GetInt32(10) != 0,
+            Status = Enum.Parse<LeaseStatus>(reader.GetString(11)),
+            EndedAtUtc = Timestamps.ParseOrNull(TextOrNull(reader, 12)),
+            EndReason = TextOrNull(reader, 13),
+            EpochId = Guid.Parse(reader.GetString(14)),
+            OriginalDuration = TimeSpan.FromSeconds(reader.GetDouble(15)),
+            LastRenewDuration = SecondsOrNull(reader, 16),
+            RemainingAtCheckpoint = SecondsOrNull(reader, 17),
+            CheckpointUtc = Timestamps.ParseOrNull(TextOrNull(reader, 18))
+        };
     }
 
     public PowerSession? LoadPowerSession(string id)

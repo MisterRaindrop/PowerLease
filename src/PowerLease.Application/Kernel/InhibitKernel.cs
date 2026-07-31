@@ -24,11 +24,18 @@ namespace PowerLease.Application.Kernel;
 /// </summary>
 public sealed class InhibitKernel
 {
+    /// <summary>
+    /// How many evaluations an effect may go unreported before the kernel stops waiting for it. Generous on
+    /// purpose: a slow disk must not look like a lost effect.
+    /// </summary>
+    private const int AbandonedEffectRevisions = 1000;
+
     private readonly KernelOptions _options;
     private readonly PowerInhibitCoordinator _power;
     private readonly IClock _clock;
     private readonly FaultRegistry _faults;
-    private readonly ExpectedProducerSet _producers;
+    private ExpectedProducerSet _producers;
+    private IReadOnlyList<string> _expectedSources;
     private readonly GracePeriodGuard _grace = new();
     private readonly EmergencyInhibitLatch _emergency = new();
 
@@ -43,6 +50,8 @@ public sealed class InhibitKernel
     private long _configGeneration;
     private long _nextEffectId;
     private MonotonicStamp? _resyncDemandedAt;
+    private long _historyWriteFailures;
+    private string? _lastHistoryWriteError;
 
     public InhibitKernel(KernelOptions options, PowerInhibitCoordinator power, IClock clock)
     {
@@ -54,7 +63,8 @@ public sealed class InhibitKernel
         _power = power;
         _clock = clock;
         _faults = new FaultRegistry(options.ConsecutiveHealthyToClearTransient);
-        _producers = new ExpectedProducerSet(options.ExpectedSources, options.HeartbeatFreshness);
+        _expectedSources = options.ExpectedSources;
+        _producers = new ExpectedProducerSet(_expectedSources, options.HeartbeatFreshness);
     }
 
     /// <summary>
@@ -173,18 +183,21 @@ public sealed class InhibitKernel
                 // Every observation describes a machine that has since been asleep, and the operating
                 // system dropped the power request when it suspended.
                 DiscardEverySourceObservation($"the machine resumed: {resumed.Reason}");
+                ReestablishLeases(now);
                 _power.Invalidate();
                 _grace.Begin(now, _options.ResumeGracePeriod, $"resumed: {resumed.Reason}");
                 break;
 
             case ServiceStarted started:
                 DiscardEverySourceObservation($"the service started: {started.Reason}");
+                ReestablishLeases(now);
                 _power.Invalidate();
                 _grace.Begin(now, _options.StartupGracePeriod, $"service started: {started.Reason}");
                 break;
 
             case ConfigurationReplaced replaced:
                 _configGeneration = replaced.ConfigGeneration;
+                Reconfigure(replaced.ExpectedSources);
                 DiscardEverySourceObservation("configuration was replaced");
                 break;
 
@@ -264,6 +277,8 @@ public sealed class InhibitKernel
         var nowUtc = _clock.UtcNow;
 
         ExpireLeases(now, nowUtc);
+        RefreshLeaseCheckpoints(now, nowUtc);
+        DropAbandonedEffects();
 
         // Before the reports are gathered, not after. Lowering the alarm afterwards would publish a
         // snapshot saying the alarm is over while still listing it among the reasons to stay awake, and a
@@ -335,7 +350,9 @@ public sealed class InhibitKernel
             _emergency.IsRaised,
             _emergency.Reason,
             _grace.IsActive(now),
-            _configGeneration);
+            _configGeneration,
+            _historyWriteFailures,
+            _lastHistoryWriteError);
 
         Volatile.Write(ref _snapshot, snapshot);
 
@@ -424,11 +441,104 @@ public sealed class InhibitKernel
                 continue;
             }
 
-            if (tracked.Deadline.HasExpiredAt(now))
+            if (!tracked.Deadline.HasExpiredAt(now))
             {
-                _leases.Remove(id);
-                _ = nowUtc;
+                continue;
             }
+
+            _leases.Remove(id);
+
+            // A failed write for this lease no longer means anything: the lease is over.
+            _faults.Clear(PersistFaultKey(id));
+
+            // Record the ending. Unlike a release there is no ordering to respect -- protection is already
+            // gone -- but it does have to be written, because a row left saying "active" with time still on
+            // it would be re-granted that time on the next restart. A three-hour hold that ran out weeks ago
+            // would come back for three more hours, every time the machine started.
+            Emit(new KernelEffect
+            {
+                EffectId = ++_nextEffectId,
+                Kind = EffectKind.PersistLease,
+                Lease = tracked.Lease with
+                {
+                    Status = LeaseStatus.Expired,
+                    EndedAtUtc = nowUtc,
+                    EndReason = "the lease ran out",
+                    RemainingAtCheckpoint = TimeSpan.Zero,
+                    CheckpointUtc = nowUtc
+                },
+                Revision = _revision
+            });
+        }
+    }
+
+    /// <summary>
+    /// Put every lease back on the current monotonic clock.
+    /// <para>
+    /// The clock starts again after a resume and after the service restarts, and a lease measured against the
+    /// old one can never be found to have expired. Without this a lease that lived through a single resume
+    /// would hold the machine awake for as long as the service ran -- the failure that makes a power
+    /// management tool worse than not having one.
+    /// </para>
+    /// <para>
+    /// A lease whose ending is already being written is left alone: it is on its way out, and re-granting it
+    /// would resurrect it for a fresh duration.
+    /// </para>
+    /// <para>
+    /// Deliberately not persisted here. If the service dies before the next checkpoint is written, the stored
+    /// row still holds the older, larger remaining time, so the lease comes back holding for longer rather
+    /// than for less.
+    /// </para>
+    /// </summary>
+    private void ReestablishLeases(MonotonicStamp now)
+    {
+        var nowUtc = _clock.UtcNow;
+
+        foreach (var tracked in _leases.Values)
+        {
+            if (tracked.Commit == LeaseCommitState.ReleasePending || tracked.Deadline.IsInEpoch(now.EpochId))
+            {
+                continue;
+            }
+
+            var resumed = LeaseDeadline.Resume(
+                tracked.Lease.TryGetCheckpoint(),
+                tracked.Lease.OriginalDuration,
+                now);
+
+            tracked.Deadline = resumed.Deadline;
+            tracked.Lease = tracked.Lease with
+            {
+                EpochId = now.EpochId,
+                RemainingAtCheckpoint = resumed.Deadline.RemainingAt(now),
+                CheckpointUtc = nowUtc
+            };
+        }
+    }
+
+    /// <summary>
+    /// Keep each lease's recorded remaining time current.
+    /// <para>
+    /// This is what makes re-establishing a lease honest. The checkpoint is the only thing a resume has to go
+    /// on, so if it were only written when a lease was created or renewed, every resume would hand back the
+    /// duration the lease started with -- and a lease on a machine that sleeps and wakes repeatedly would
+    /// never end.
+    /// </para>
+    /// </summary>
+    private void RefreshLeaseCheckpoints(MonotonicStamp now, DateTimeOffset nowUtc)
+    {
+        foreach (var tracked in _leases.Values)
+        {
+            if (tracked.Commit == LeaseCommitState.ReleasePending || !tracked.Deadline.IsInEpoch(now.EpochId))
+            {
+                continue;
+            }
+
+            tracked.Lease = tracked.Lease with
+            {
+                RemainingAtCheckpoint = tracked.Deadline.RemainingAt(now),
+                CheckpointUtc = nowUtc
+            };
         }
     }
 
@@ -579,10 +689,11 @@ public sealed class InhibitKernel
             Kind = kind,
             LeaseId = lease.Id,
             RequestId = command.RequestId,
-            Success = success
+            Success = success,
+            IssuedAtRevision = _revision
         };
 
-        Emit(new KernelEffect
+        _pendingEffects.Add(new KernelEffect
         {
             EffectId = effectId,
             Kind = kind,
@@ -604,26 +715,46 @@ public sealed class InhibitKernel
 
         if (pending.Kind == EffectKind.RecordInhibitChange)
         {
+            // Deliberately not a fault. A fault is a reason to stay awake, and the rule for that is whether the
+            // evidence behind a release decision can be trusted -- but this is the record of decisions already
+            // made, not evidence for the current one. Treating it as a fault would also deadlock: the fault
+            // holds, so the protection state stops changing, so no further history is written, so nothing ever
+            // reports it healthy and it could never clear. It is counted and published instead, so status can
+            // show that history is being lost without the machine being pinned awake over a disk problem that
+            // has no bearing on safety.
             if (completion.Outcome != EffectOutcome.Succeeded)
             {
-                _faults.Report(
-                    "inhibit-journal",
-                    FaultSeverity.Transient,
-                    $"The protection history could not be written: {completion.Error}",
-                    _clock.UtcNow);
+                _historyWriteFailures++;
+                _lastHistoryWriteError = completion.Error;
             }
 
             return;
         }
 
         var leaseId = pending.LeaseId!;
-        var requestId = pending.RequestId!;
         _leases.TryGetValue(leaseId, out var tracked);
+
+        if (pending.RequestId is not { } requestId)
+        {
+            // Nobody is waiting on this one -- it records a lease the kernel ended by itself. Only its failure
+            // matters, and that is handled below.
+            if (completion.Outcome != EffectOutcome.Succeeded)
+            {
+                _faults.Report(
+                    PersistFaultKey(leaseId),
+                    FaultSeverity.Transient,
+                    $"The end of lease '{leaseId}' could not be recorded: {completion.Error}",
+                    _clock.UtcNow);
+            }
+
+            return;
+        }
 
         switch (completion.Outcome)
         {
             case EffectOutcome.Succeeded when pending.Kind == EffectKind.PersistLeaseRelease:
                 _leases.Remove(leaseId);
+                _faults.Clear(PersistFaultKey(leaseId));
                 _pendingResults.Add(new LeaseCommandResult(requestId, LeaseCommandStatus.Released, leaseId));
                 break;
 
@@ -632,6 +763,10 @@ public sealed class InhibitKernel
                 {
                     tracked.Commit = LeaseCommitState.Committed;
                 }
+
+                // Lets an earlier write failure for this lease clear, instead of latching for the process's
+                // lifetime over one full disk.
+                _faults.ReportHealthy(PersistFaultKey(leaseId));
 
                 _pendingResults.Add(new LeaseCommandResult(
                     requestId, pending.Success, leaseId, completion.ResultJson));
@@ -690,7 +825,7 @@ public sealed class InhibitKernel
         }
 
         _faults.Report(
-            $"lease-persist:{leaseId}",
+            PersistFaultKey(leaseId),
             FaultSeverity.Transient,
             $"A lease change could not be made durable: {completion.Error}",
             _clock.UtcNow);
@@ -699,16 +834,33 @@ public sealed class InhibitKernel
             pending.RequestId!, LeaseCommandStatus.Failed, leaseId, Error: completion.Error));
     }
 
+    /// <summary>
+    /// One key per lease, so a write failure is reported against the lease it belongs to and can be cleared
+    /// when that lease succeeds or ends. Without the clearing, the fault list -- and therefore the inhibitor
+    /// list -- would grow by one entry for every lease that ever failed to persist.
+    /// </summary>
+    private static string PersistFaultKey(string leaseId) => $"lease-persist:{leaseId}";
+
     private void Reject(LeaseCommand command, string reason) =>
         _pendingResults.Add(new LeaseCommandResult(
             command.RequestId, LeaseCommandStatus.Rejected, command.LeaseId, Error: reason));
 
+    /// <summary>
+    /// Queue an effect and remember it, so its outcome can be routed back.
+    /// <para>
+    /// Everything is registered, including effects nobody is waiting on. An unregistered effect's completion
+    /// cannot be matched to anything, so its failure would be discarded without a trace -- which for the record
+    /// that a lease ended means a row left saying "active" and that lease coming back on the next restart.
+    /// </para>
+    /// </summary>
     private void Emit(KernelEffect effect)
     {
-        if (effect.Kind == EffectKind.RecordInhibitChange)
+        _inFlight[effect.EffectId] = new PendingEffect
         {
-            _inFlight[effect.EffectId] = new PendingEffect { Kind = effect.Kind };
-        }
+            Kind = effect.Kind,
+            LeaseId = effect.Lease?.Id,
+            IssuedAtRevision = _revision
+        };
 
         _pendingEffects.Add(effect);
     }
@@ -740,6 +892,55 @@ public sealed class InhibitKernel
         return disposition;
     }
 
+    /// <summary>
+    /// Follow a change of configuration: forget the sources that are gone and expect the ones that are new.
+    /// <para>
+    /// Switching a rule off is an ordinary thing for a user to do. Without this, the source behind it would
+    /// stay in the table, go stale, and be turned into a reason to stay awake on every cycle from then on --
+    /// so the machine would never sleep again until the service restarted, and status would blame a producer
+    /// that is no longer configured. The direction is safe, but the release path would be permanently dead.
+    /// </para>
+    /// </summary>
+    /// <summary>
+    /// Forget effects nobody ever reported back.
+    /// <para>
+    /// The host is supposed to report every effect exactly once. If it dies between issuing a write and
+    /// reporting it, or is replaced, the entry would otherwise sit here for the lifetime of a process designed
+    /// to run for months. Dropping one is safe: an unconfirmed lease stays provisional and expires on its own
+    /// deadline, so protection is not affected either way.
+    /// </para>
+    /// </summary>
+    private void DropAbandonedEffects()
+    {
+        if (_revision <= AbandonedEffectRevisions)
+        {
+            return;
+        }
+
+        var cutoff = _revision - AbandonedEffectRevisions;
+        foreach (var effectId in _inFlight
+            .Where(entry => entry.Value.IssuedAtRevision < cutoff)
+            .Select(entry => entry.Key)
+            .ToArray())
+        {
+            _inFlight.Remove(effectId);
+        }
+    }
+
+    private void Reconfigure(IReadOnlyList<string> expectedSources)
+    {
+        ArgumentNullException.ThrowIfNull(expectedSources);
+
+        _expectedSources = expectedSources;
+        _producers = new ExpectedProducerSet(expectedSources, _options.HeartbeatFreshness);
+
+        var expected = new HashSet<string>(expectedSources, StringComparer.Ordinal);
+        foreach (var sourceId in _sources.Keys.Where(id => !expected.Contains(id)).ToArray())
+        {
+            _sources.Remove(sourceId);
+        }
+    }
+
     private void DiscardEverySourceObservation(string reason)
     {
         foreach (var entry in _sources.Values)
@@ -765,7 +966,7 @@ public sealed class InhibitKernel
             return;
         }
 
-        foreach (var expected in _options.ExpectedSources)
+        foreach (var expected in _expectedSources)
         {
             if (!_sources.TryGetValue(expected, out var entry)
                 || entry.Distrusted is not null
@@ -830,5 +1031,8 @@ public sealed class InhibitKernel
         public string? RequestId { get; init; }
 
         public LeaseCommandStatus Success { get; init; }
+
+        /// <summary>The revision that issued this, so an effect nobody ever reports back can be dropped.</summary>
+        public long IssuedAtRevision { get; init; }
     }
 }
