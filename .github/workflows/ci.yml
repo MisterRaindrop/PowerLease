@@ -94,23 +94,23 @@ jobs:
       # self-contained, so they each carry a full runtime with identical file names and
       # would collide if installed into one folder.
       #
-      # RestorePackagesWithLockFile=false is required, not cosmetic: publishing with a
-      # runtime identifier makes restore rewrite every packages.lock.json to include the
-      # win-x64 RID graph. The committed lock files are deliberately RID-agnostic so that
-      # `dotnet restore --locked-mode` works in the other jobs, and a rewritten lock breaks
-      # them with NU1004. Keeping it off here means the publish cannot mutate them.
+      # Publishing with a runtime identifier rewrites every packages.lock.json to include
+      # the win-x64 RID graph. That is harmless HERE because the runner workspace is
+      # thrown away and no later step restores with --locked-mode. It is not harmless in a
+      # developer's working tree: the committed locks are deliberately RID-agnostic so the
+      # other two jobs can restore with --locked-mode, so never commit locks that a RID
+      # publish has touched. (Setting RestorePackagesWithLockFile=false is not an option --
+      # NuGet rejects that as NU1005 when a lock file exists.)
       - name: Publish service
         run: >-
           dotnet publish src/PowerLease.Service/PowerLease.Service.csproj
           -c Release -r win-x64 --self-contained true
-          -p:RestorePackagesWithLockFile=false
           -o artifacts/publish/Service
 
       - name: Publish CLI
         run: >-
           dotnet publish src/PowerLease.Cli/PowerLease.Cli.csproj
           -c Release -r win-x64 --self-contained true
-          -p:RestorePackagesWithLockFile=false
           -o artifacts/publish/Cli
 
       - name: Build MSI
