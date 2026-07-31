@@ -93,16 +93,24 @@ jobs:
       # Service and CLI are published separately into their own directories. Both are
       # self-contained, so they each carry a full runtime with identical file names and
       # would collide if installed into one folder.
+      #
+      # RestorePackagesWithLockFile=false is required, not cosmetic: publishing with a
+      # runtime identifier makes restore rewrite every packages.lock.json to include the
+      # win-x64 RID graph. The committed lock files are deliberately RID-agnostic so that
+      # `dotnet restore --locked-mode` works in the other jobs, and a rewritten lock breaks
+      # them with NU1004. Keeping it off here means the publish cannot mutate them.
       - name: Publish service
         run: >-
           dotnet publish src/PowerLease.Service/PowerLease.Service.csproj
           -c Release -r win-x64 --self-contained true
+          -p:RestorePackagesWithLockFile=false
           -o artifacts/publish/Service
 
       - name: Publish CLI
         run: >-
           dotnet publish src/PowerLease.Cli/PowerLease.Cli.csproj
           -c Release -r win-x64 --self-contained true
+          -p:RestorePackagesWithLockFile=false
           -o artifacts/publish/Cli
 
       - name: Build MSI
