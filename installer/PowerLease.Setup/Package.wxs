@@ -145,8 +145,14 @@
                         Wait="yes" />
       </Component>
 
-      <Files Include="$(var.ServicePublishDir)**"
-             Exclude="$(var.ServicePublishDir)PowerLease.Service.exe" />
+      <!--
+        Exclude is a child element with a Files attribute, not an attribute on Files.
+        The service executable is excluded here because it is declared explicitly above so
+        ServiceInstall can hang off its component; harvesting it again would declare it twice.
+      -->
+      <Files Include="$(var.ServicePublishDir)**">
+        <Exclude Files="$(var.ServicePublishDir)PowerLease.Service.exe" />
+      </Files>
     </ComponentGroup>
 
     <ComponentGroup Id="CliComponents" Directory="CliDir">

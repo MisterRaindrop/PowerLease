@@ -25,7 +25,11 @@
       Suppressed narrowly here rather than globally, and only because the repo sets
       TreatWarningsAsErrors.
     -->
-    <NoWarn>$(NoWarn);WIX1149</NoWarn>
+    <!--
+      WiX does not honour MSBuild's NoWarn; it has its own switch, which the SDK surfaces as
+      SuppressSpecificWarnings and which takes bare numbers with no "WIX" prefix.
+    -->
+    <SuppressSpecificWarnings>$(SuppressSpecificWarnings);1149</SuppressSpecificWarnings>
 
     <!--
       No lock file for the installer projects. `dotnet restore` on a .wixproj hangs
