@@ -75,27 +75,40 @@ function Get-InstalledPowerLease {
     }
 }
 
+function Get-RegistryValue {
+    param($Entry, [string] $Name)
+    if ($Entry.PSObject.Properties.Name -contains $Name) { $Entry.$Name } else { $null }
+}
+
+# What "registered" means to a user is what Programs and Features shows, and that list hides
+# entries flagged SystemComponent=1. The inner MSI sets that flag deliberately, so counting raw
+# registry keys would report two products for one installation.
+function Get-VisiblePowerLease {
+    # @() at the call site is not redundant: PowerShell unrolls an empty array returned from a
+    # function into $null, and Set-StrictMode then makes $null.Count a terminating error.
+    @(@(Get-InstalledPowerLease) | Where-Object { (Get-RegistryValue $_ 'SystemComponent') -ne 1 })
+}
+
 function Write-PowerLeaseRegistrations {
     param([string] $When)
-    $entries = Get-InstalledPowerLease
-    Write-Host "ARP entries named PowerLease $When : $($entries.Count)"
-    foreach ($e in $entries) {
-        $ver = if ($e.PSObject.Properties.Name -contains 'DisplayVersion') { $e.DisplayVersion } else { '<none>' }
-        $un = if ($e.PSObject.Properties.Name -contains 'UninstallString') { $e.UninstallString } else { '<none>' }
-        $sys = if ($e.PSObject.Properties.Name -contains 'SystemComponent') { $e.SystemComponent } else { '<unset>' }
-        Write-Host "    version=$ver systemComponent=$sys"
-        Write-Host "    uninstall=$un"
+    $all = @(Get-InstalledPowerLease)
+    $visible = @(Get-VisiblePowerLease)
+    Write-Host "ARP keys named PowerLease $When : $($all.Count) total, $($visible.Count) visible"
+    foreach ($e in $all) {
+        $ver = Get-RegistryValue $e 'DisplayVersion'
+        $sys = Get-RegistryValue $e 'SystemComponent'
+        $un = Get-RegistryValue $e 'UninstallString'
+        Write-Host "    version=$(if ($ver) { $ver } else { '<none>' }) systemComponent=$(if ($null -ne $sys) { $sys } else { '<unset>' })"
+        Write-Host "    uninstall=$(if ($un) { $un } else { '<none>' })"
     }
 }
 
-function Get-InstalledPowerLeaseCount { (Get-InstalledPowerLease).Count }
+function Get-InstalledPowerLeaseCount { @(Get-VisiblePowerLease).Count }
 
 function Get-InstalledPowerLeaseVersion {
-    $entries = Get-InstalledPowerLease
+    $entries = @(Get-VisiblePowerLease)
     if ($entries.Count -ne 1) { return $null }
-    $entry = $entries[0]
-    if ($entry.PSObject.Properties.Name -notcontains 'DisplayVersion') { return $null }
-    $entry.DisplayVersion
+    Get-RegistryValue $entries[0] 'DisplayVersion'
 }
 
 Write-Host "=== Preconditions ==="
