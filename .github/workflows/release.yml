@@ -14,6 +14,11 @@ jobs:
   release:
     runs-on: windows-latest
     timeout-minutes: 40
+    env:
+      # The secrets context is NOT available in an `if` condition, only in with/env/run, so the
+      # certificate is surfaced as an env var that the signing step can test. Empty until a
+      # certificate exists.
+      SIGNING_CERTIFICATE: ${{ secrets.SIGNING_CERTIFICATE }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v5
@@ -63,7 +68,7 @@ jobs:
       # below records which happened.
       - name: Sign binaries
         id: sign
-        if: ${{ secrets.SIGNING_CERTIFICATE != '' }}
+        if: env.SIGNING_CERTIFICATE != ''
         shell: pwsh
         run: |
           throw 'Signing is not implemented yet. Remove this step guard when a certificate and a signing procedure exist.'
