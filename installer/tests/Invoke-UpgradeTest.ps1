@@ -53,7 +53,8 @@ function Invoke-Package {
 }
 
 function Get-InstalledPowerLease {
-    # Only the bundle should register in Programs and Features; the inner MSI is Visible="no".
+    # Only the bundle should register in Programs and Features. The inner MSI hides itself with
+    # ARPSYSTEMCOMPONENT=1; Visible="no" on the bundle's MsiPackage does not do that.
     #
     # Plenty of uninstall keys have no DisplayName at all, and Set-StrictMode turns reading a
     # missing property into a terminating error, so presence is checked before the comparison.
