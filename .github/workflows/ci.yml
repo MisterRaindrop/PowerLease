@@ -129,11 +129,22 @@ jobs:
       # The only place the installer's behaviour is actually verified. Every claim the MSI
       # makes about the service, PATH and ProgramData is unproven until this runs, because
       # the development machine for this project is macOS.
-      - name: Installer smoke test
+      - name: Installer smoke test (MSI)
         shell: pwsh
         run: >-
           installer/tests/Invoke-InstallerSmokeTest.ps1
           -MsiPath "${{ github.workspace }}\installer\PowerLease.Setup\bin\Release\PowerLease.msi"
+
+      # Same assertions against the Setup EXE, because that is the path a real user takes and
+      # a bundle can be broken in ways its inner MSI is not.
+      - name: Installer smoke test (Setup EXE)
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem "${{ github.workspace }}\installer\PowerLease.Bundle\bin\Release" -Filter 'PowerLease-Setup-*-x64.exe' -Recurse |
+                 Select-Object -First 1
+          if (-not $exe) { throw 'No Setup EXE was produced by the bundle build.' }
+          Write-Host "Testing $($exe.FullName)"
+          installer/tests/Invoke-InstallerSmokeTest.ps1 -BundlePath $exe.FullName
 
       - name: Upload installer artifacts
         if: always()

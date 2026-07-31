@@ -27,11 +27,19 @@
         Vital so a failed MSI fails the bundle rather than reporting success over a broken
         install. Compressed above embeds the MSI in the EXE, which is the point: one file to
         download, no companion payloads to keep together.
+
+        Visible="no" keeps the MSI out of Programs and Features so only "PowerLease" (the
+        bundle) is listed. Two entries for one product invites a user into uninstalling the
+        inner package and leaving the bundle registration behind.
+
+        There is no DisplayInternalUI attribute in WiX 6: the bootstrapper application owns
+        the UI and Burn never shows the MSI's own dialogs, so the old attribute is gone
+        rather than renamed.
       -->
       <MsiPackage Id="PowerLeaseMsi"
                   SourceFile="$(var.MsiPath)"
                   Vital="yes"
-                  DisplayInternalUI="no" />
+                  Visible="no" />
     </Chain>
 
   </Bundle>

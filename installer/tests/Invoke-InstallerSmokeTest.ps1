@@ -17,12 +17,19 @@
     API, and this version of the product contains no such code path at all, so nothing here
     can put the runner to sleep. The service is also deliberately NOT started by the MSI.
 #>
-[CmdletBinding()]
+[CmdletBinding(DefaultParameterSetName = 'Msi')]
 param(
-    [Parameter(Mandatory = $true)]
+    # Verify the MSI directly.
+    [Parameter(Mandatory = $true, ParameterSetName = 'Msi')]
     [string] $MsiPath,
 
-    # Kept overridable so a developer can smoke-test a locally built MSI in a VM.
+    # Verify the Burn bundle, which is the path an actual user takes. The assertions are
+    # identical because the bundle installs this same MSI; what differs is only how install
+    # and uninstall are invoked.
+    [Parameter(Mandatory = $true, ParameterSetName = 'Bundle')]
+    [string] $BundlePath,
+
+    # Kept overridable so a developer can smoke-test a locally built package in a VM.
     [string] $ServiceName = 'PowerLease',
     [string] $InstallDir = "$env:ProgramFiles\PowerLease",
     [string] $DataDir = "$env:ProgramData\PowerLease"
@@ -44,28 +51,67 @@ function Test-That {
     else { $script:Failures.Add($Description); Write-Host "  FAIL  $Description" }
 }
 
-function Invoke-Msi {
-    param([string[]] $MsiArguments, [string] $LogName)
+$script:UsingBundle = $PSCmdlet.ParameterSetName -eq 'Bundle'
+$script:PackagePath = if ($script:UsingBundle) { $BundlePath } else { $MsiPath }
 
-    $log = Join-Path $env:RUNNER_TEMP "$LogName.log"
-    if (-not $env:RUNNER_TEMP) { $log = Join-Path $env:TEMP "$LogName.log" }
+function Get-LogPath {
+    param([string] $LogName)
+    $dir = if ($env:RUNNER_TEMP) { $env:RUNNER_TEMP } else { $env:TEMP }
+    Join-Path $dir "$LogName.log"
+}
 
-    $all = $MsiArguments + @('/quiet', '/norestart', '/l*v', $log)
-    Write-Host "msiexec $($all -join ' ')"
-    $p = Start-Process -FilePath 'msiexec.exe' -ArgumentList $all -Wait -PassThru
-    if ($p.ExitCode -ne 0) {
-        Write-Host "--- msiexec log tail ---"
-        if (Test-Path $log) { Get-Content $log -Tail 60 | ForEach-Object { Write-Host $_ } }
-        throw "msiexec failed with exit code $($p.ExitCode)"
+function Invoke-Install {
+    param([string] $LogName)
+
+    $log = Get-LogPath $LogName
+    if ($script:UsingBundle) {
+        # Burn writes its own log; /log points it at a predictable path.
+        $all = @('/quiet', '/norestart', '/log', $log)
+        Write-Host "$script:PackagePath $($all -join ' ')"
+        $p = Start-Process -FilePath $script:PackagePath -ArgumentList $all -Wait -PassThru
+    }
+    else {
+        $all = @('/i', "`"$script:PackagePath`"", '/quiet', '/norestart', '/l*v', $log)
+        Write-Host "msiexec $($all -join ' ')"
+        $p = Start-Process -FilePath 'msiexec.exe' -ArgumentList $all -Wait -PassThru
+    }
+    Assert-ExitCode -Process $p -Log $log -What 'install'
+}
+
+function Invoke-Uninstall {
+    param([string] $LogName)
+
+    $log = Get-LogPath $LogName
+    if ($script:UsingBundle) {
+        $all = @('/uninstall', '/quiet', '/norestart', '/log', $log)
+        Write-Host "$script:PackagePath $($all -join ' ')"
+        $p = Start-Process -FilePath $script:PackagePath -ArgumentList $all -Wait -PassThru
+    }
+    else {
+        $all = @('/x', "`"$script:PackagePath`"", '/quiet', '/norestart', '/l*v', $log)
+        Write-Host "msiexec $($all -join ' ')"
+        $p = Start-Process -FilePath 'msiexec.exe' -ArgumentList $all -Wait -PassThru
+    }
+    Assert-ExitCode -Process $p -Log $log -What 'uninstall'
+}
+
+function Assert-ExitCode {
+    param($Process, [string] $Log, [string] $What)
+
+    if ($Process.ExitCode -ne 0) {
+        Write-Host "--- $What log tail ---"
+        if (Test-Path $Log) { Get-Content $Log -Tail 60 | ForEach-Object { Write-Host $_ } }
+        throw "$What failed with exit code $($Process.ExitCode)"
     }
 }
 
+Write-Host "=== Target: $(if ($script:UsingBundle) { 'Burn bundle (Setup EXE)' } else { 'MSI' }) ==="
 Write-Host "=== Preconditions ==="
 Test-That 'service is not already installed' { -not (Get-Service -Name $ServiceName -ErrorAction SilentlyContinue) }
-Test-That 'MSI exists' { Test-Path -LiteralPath $MsiPath }
+Test-That 'package exists' { Test-Path -LiteralPath $script:PackagePath }
 
 Write-Host "`n=== Install ==="
-Invoke-Msi -MsiArguments @('/i', "`"$MsiPath`"") -LogName 'powerlease-install'
+Invoke-Install -LogName 'powerlease-install'
 
 $svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
 Test-That 'service is registered' { $null -ne $svc }
@@ -153,7 +199,7 @@ Write-Host "`n=== Data directory ==="
 Test-That 'ProgramData root was created by the MSI' { Test-Path $DataDir }
 
 Write-Host "`n=== Uninstall ==="
-Invoke-Msi -MsiArguments @('/x', "`"$MsiPath`"") -LogName 'powerlease-uninstall'
+Invoke-Uninstall -LogName 'powerlease-uninstall'
 
 Test-That 'service is deregistered' { -not (Get-Service -Name $ServiceName -ErrorAction SilentlyContinue) }
 Test-That 'install directory is gone' { -not (Test-Path "$InstallDir\Service\PowerLease.Service.exe") }
