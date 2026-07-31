@@ -71,10 +71,25 @@
     -->
     <Property Id="ARPSYSTEMCOMPONENT" Value="1" />
 
+    <!--
+      Read back the data directory recorded at install time. AppSearch runs early enough that
+      the value is available to the deferred removal during an uninstall, which is not true of
+      a directory property.
+    -->
+    <Property Id="POWERLEASEDATADIR" Secure="yes">
+      <RegistrySearch Id="FindPowerLeaseDataDir"
+                      Root="HKLM"
+                      Key="SOFTWARE\PowerLease"
+                      Name="DataDirectory"
+                      Type="raw"
+                      Bitness="always64" />
+    </Property>
+
     <Feature Id="FeatureService" Title="PowerLease Service" Level="1" AllowAbsent="no"
              Description="Background Windows service that holds the keep-awake inhibit.">
       <ComponentGroupRef Id="ServiceComponents" />
       <ComponentGroupRef Id="DataDirectoryComponents" />
+      <ComponentGroupRef Id="DataPurgeComponents" />
     </Feature>
 
     <Feature Id="FeatureCli" Title="PowerLease CLI" Level="1"
@@ -212,20 +227,37 @@
           <util:PermissionEx User="Administrators" GenericAll="yes" />
           <util:PermissionEx User="Users" GenericRead="yes" GenericExecute="yes" />
         </CreateFolder>
-
-        <!--
-          Opt-in wipe. Uses the resolved DataFolder path rather than a hardcoded string,
-          and only runs on a full uninstall with REMOVEUSERDATA=1.
-        -->
-        <util:RemoveFolderEx Id="RemovePowerLeaseData"
-                             On="uninstall"
-                             Property="DATAFOLDER"
-                             Condition="REMOVEUSERDATA = 1" />
       </Component>
     </ComponentGroup>
 
-    <!-- RemoveFolderEx needs the directory as a property value at uninstall time. -->
-    <SetProperty Id="DATAFOLDER" Value="[DataFolder]" After="CostFinalize" Sequence="execute" />
+    <!--
+      Opt-in wipe of everything under ProgramData, deliberately in its own NON-permanent
+      component.
+
+      The removal used to live in DataFolderComponent above, which is Permanent="yes" so that
+      an uninstall leaves the directory alone. A permanent component is never uninstalled, so
+      an On="uninstall" action inside it never fires and the switch silently did nothing.
+
+      The path comes from a registry value written at install time and read back by AppSearch,
+      not from [DataFolder]: directory properties are not reliably resolved for the deferred
+      custom action during an uninstall, whereas a registry search runs early and is exactly
+      what RemoveFolderEx expects.
+    -->
+    <ComponentGroup Id="DataPurgeComponents" Directory="ServiceDir">
+      <Component Id="DataPurgeComponent" Bitness="always64">
+        <RegistryValue Root="HKLM"
+                       Key="SOFTWARE\PowerLease"
+                       Name="DataDirectory"
+                       Type="string"
+                       Value="[DataFolder]"
+                       KeyPath="yes" />
+
+        <util:RemoveFolderEx Id="RemovePowerLeaseData"
+                             On="uninstall"
+                             Property="POWERLEASEDATADIR"
+                             Condition="REMOVEUSERDATA = 1" />
+      </Component>
+    </ComponentGroup>
   </Fragment>
 
 </Wix>

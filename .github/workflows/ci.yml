@@ -201,5 +201,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: msiexec-logs
-          path: ${{ runner.temp }}/powerlease-*.log
+          # Covers powerlease-*, upgrade-* and purge-* logs; a narrower glob meant the
+          # upgrade failures had no evidence attached.
+          path: ${{ runner.temp }}/*.log
           if-no-files-found: ignore
