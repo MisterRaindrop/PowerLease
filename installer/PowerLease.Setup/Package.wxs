@@ -123,8 +123,9 @@
             Failure actions, via the util extension because the built-in element cannot
             express them. Without these a crash leaves the service stopped, the OS
             reclaims the power request handle, and Windows is then free to sleep the
-            machine during an active SSH session -- exactly the failure this product
-            exists to prevent. First restart has no delay to keep that window short.
+            machine during an active SSH session, which is exactly the failure this
+            product exists to prevent. First restart has no delay to keep that window
+            short.
           -->
           <util:ServiceConfig FirstFailureActionType="restart"
                               SecondFailureActionType="restart"

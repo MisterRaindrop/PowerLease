@@ -26,7 +26,7 @@
     <!--
       No lock file for the installer projects. `dotnet restore` on a .wixproj hangs
       indefinitely on macOS (the development machine here), so a lock file could never be
-      regenerated when a dependency changes -- committing one would be a promise we cannot
+      regenerated when a dependency changes. Committing one would be a promise we cannot
       keep, and CI would then fail on a stale lock instead of on a real problem.
       The actual inputs are still pinned: the toolset version lives in each .wixproj's Sdk
       attribute and the extension versions in Directory.Packages.props.
