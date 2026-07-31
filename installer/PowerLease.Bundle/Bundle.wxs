@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:bal="http://wixtoolset.org/schemas/v4/wxs/bal">
+
+  <!--
+    Burn bundle wrapping the MSI so users download one Setup EXE.
+
+    The UpgradeCode below is distinct from the MSI's on purpose: a bundle and the package it
+    carries are separately-upgradable products as far as Windows is concerned, and sharing one
+    code makes each look like an upgrade of the other. Like the MSI's, it must never change.
+  -->
+  <Bundle Name="PowerLease"
+          Version="$(var.ProductVersion)"
+          Manufacturer="PowerLease"
+          UpgradeCode="F645D949-F389-4F88-BBA4-A4D044809377"
+          Compressed="yes"
+          AboutUrl="https://github.com/MisterRaindrop/PowerLease">
+
+    <BootstrapperApplication>
+      <bal:WixStandardBootstrapperApplication
+        Theme="hyperlinkLicense"
+        LicenseUrl="https://github.com/MisterRaindrop/PowerLease/blob/main/LICENSE" />
+    </BootstrapperApplication>
+
+    <Chain>
+      <!--
+        Vital so a failed MSI fails the bundle rather than reporting success over a broken
+        install. Compressed above embeds the MSI in the EXE, which is the point: one file to
+        download, no companion payloads to keep together.
+      -->
+      <MsiPackage Id="PowerLeaseMsi"
+                  SourceFile="$(var.MsiPath)"
+                  Vital="yes"
+                  DisplayInternalUI="no" />
+    </Chain>
+
+  </Bundle>
+
+</Wix>
