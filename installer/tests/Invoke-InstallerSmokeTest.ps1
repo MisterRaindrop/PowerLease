@@ -104,9 +104,18 @@ Test-That 'service tree has its own runtime' { Test-Path "$InstallDir\Service\ho
 Test-That 'CLI tree has its own runtime' { Test-Path "$InstallDir\Cli\hostfxr.dll" }
 
 Write-Host "`n=== PATH ==="
-$machinePath = [Environment]::GetEnvironmentVariable('Path', 'Machine')
-Test-That 'Cli directory is on the machine PATH' { $machinePath -split ';' -contains "$InstallDir\Cli" }
-Test-That 'Service directory is NOT on PATH' { -not ($machinePath -split ';' -contains "$InstallDir\Service") }
+# MSI resolves a directory property with a trailing backslash, so the entry PATH actually
+# receives is "...\Cli\". That is legal and works, so entries are compared with trailing
+# separators trimmed rather than changing the package to produce a tidier-looking string.
+function Get-MachinePathEntries {
+    ([Environment]::GetEnvironmentVariable('Path', 'Machine') -split ';') |
+        Where-Object { $_ } |
+        ForEach-Object { $_.TrimEnd('\') }
+}
+$pathEntries = Get-MachinePathEntries
+Write-Host "PowerLease entries on PATH: $(($pathEntries | Where-Object { $_ -like '*PowerLease*' }) -join ' | ')"
+Test-That 'Cli directory is on the machine PATH' { $pathEntries -contains "$InstallDir\Cli" }
+Test-That 'Service directory is NOT on PATH' { -not ($pathEntries -contains "$InstallDir\Service") }
 
 # The runner process inherited its PATH before the install, so invoke by full path first and
 # only then rebuild the environment to check the bare command resolves.
@@ -152,7 +161,7 @@ Test-That 'install directory is gone' { -not (Test-Path "$InstallDir\Service\Pow
 # user's configuration and history with it.
 Test-That 'ProgramData survives uninstall' { Test-Path $DataDir }
 Test-That 'Cli directory removed from PATH' {
-    -not (([Environment]::GetEnvironmentVariable('Path', 'Machine')) -split ';' -contains "$InstallDir\Cli")
+    -not ((Get-MachinePathEntries) -contains "$InstallDir\Cli")
 }
 
 Write-Host "`n=== Result ==="
