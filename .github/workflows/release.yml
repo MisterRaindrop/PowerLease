@@ -132,6 +132,9 @@ jobs:
             artifacts/release/PowerLease-Setup-*-x64.exe
             artifacts/release/PowerLease-*-win-x64.zip
 
+      # Release notes live in a template file rather than a here-string. A PowerShell
+      # here-string needs its terminator at column 0, which ends a YAML block scalar and made
+      # the whole workflow file invalid; the template also keeps the prose editable.
       - name: Create GitHub release
         shell: pwsh
         env:
@@ -139,33 +142,28 @@ jobs:
         run: |
           $version = '${{ steps.version.outputs.version }}'
           $signed = if ('${{ steps.sign.outcome }}' -eq 'success') { 'signed' } else { '**not signed**' }
-          $notes = @"
-PowerLease $version
 
-Artifacts are $signed. There is no code-signing certificate for this project yet, so
-SmartScreen will warn about an unknown publisher. Verify downloads against
-``SHA256SUMS.txt`` and the attached build provenance attestation.
+          $notesPath = Join-Path $env:RUNNER_TEMP 'release-notes.md'
+          (Get-Content 'installer/RELEASE_NOTES_TEMPLATE.md' -Raw).
+            Replace('{{VERSION}}', $version).
+            Replace('{{SIGNED}}', $signed) | Set-Content $notesPath -Encoding utf8
+          Write-Host '--- release notes ---'
+          Get-Content $notesPath | ForEach-Object { Write-Host $_ }
 
-**This version keeps the machine awake; it never puts it to sleep.** Windows continues to
-sleep on idle according to your own power plan. There is no automatic sleep and no GUI.
+          # $assets, not @assets: for a native command PowerShell expands an array into
+          # separate arguments, while @ is hashtable splatting and would be passed literally.
+          $assets = @(Get-ChildItem 'artifacts/release' -File | ForEach-Object { $_.FullName })
+          if ($assets.Count -eq 0) { throw 'No release assets were assembled.' }
 
-After installing, the service is registered but **stopped**. It starts on the next boot
-(Automatic, Delayed Start), or immediately with:
-
-``````
-Start-Service PowerLease
-``````
-
-See the README for why the installer deliberately does not start it.
-"@
-          $pre = if ('${{ steps.version.outputs.prerelease }}' -eq 'true') { '--prerelease' } else { '' }
-          $assets = (Get-ChildItem 'artifacts/release' -File | ForEach-Object { $_.FullName })
-          gh release create "${{ github.ref_name }}" @assets --title "PowerLease $version" --notes $notes $pre
+          $args = @($assets) + @('--title', "PowerLease $version", '--notes-file', $notesPath)
+          if ('${{ steps.version.outputs.prerelease }}' -eq 'true') { $args += '--prerelease' }
+          gh release create "${{ github.ref_name }}" $args
+          if ($LASTEXITCODE -ne 0) { throw "gh release create failed with $LASTEXITCODE" }
 
       - name: Upload build logs
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: release-logs
-          path: ${{ runner.temp }}/powerlease-*.log
+          path: ${{ runner.temp }}/*.log
           if-no-files-found: ignore
