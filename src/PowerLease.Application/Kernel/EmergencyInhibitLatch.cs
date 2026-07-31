@@ -31,9 +31,10 @@ public sealed class EmergencyInhibitLatch
     {
         ArgumentException.ThrowIfNullOrEmpty(reason);
 
-        // The reason is written first so that anything seeing the raised flag also sees why. Losing the
-        // race to another caller leaves the earlier reason in place, which is fine: both are true and
-        // the first one is the earliest evidence.
+        // The flag is raised first and the reason written after, which means a reader can briefly see the
+        // latch raised with no reason yet. That is the right way round: writing the reason first would let a
+        // caller that then loses the race overwrite the winner's reason. The kernel substitutes a generic
+        // reason for that one cycle, and the decision to hold never depended on the text.
         if (Interlocked.CompareExchange(ref _state, Raised, Lowered) != Lowered)
         {
             return false;

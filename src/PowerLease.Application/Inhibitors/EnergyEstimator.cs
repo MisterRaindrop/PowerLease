@@ -45,9 +45,7 @@ public sealed class EnergyEstimator
     /// </param>
     public EnergyEstimator(double? idleBaselineWatts)
     {
-        _idleBaselineWatts = idleBaselineWatts is { } watts && watts >= 0 && !double.IsNaN(watts)
-            ? watts
-            : null;
+        _idleBaselineWatts = idleBaselineWatts is { } watts && IsUsable(watts) ? watts : null;
     }
 
     /// <summary>
@@ -63,7 +61,7 @@ public sealed class EnergyEstimator
             return EnergyEstimate.Unavailable("The period has no length.");
         }
 
-        if (averageMeasuredWatts is { } measured && measured >= 0 && !double.IsNaN(measured))
+        if (averageMeasuredWatts is { } measured && IsUsable(measured))
         {
             return new EnergyEstimate(
                 measured * duration.TotalHours,
@@ -83,4 +81,11 @@ public sealed class EnergyEstimator
         return EnergyEstimate.Unavailable(
             "No power sensor reported a figure and no idle baseline is configured.");
     }
+
+    /// <summary>
+    /// Infinity is refused as firmly as NaN. An infinite figure labelled as measured is exactly what the
+    /// estimated flag exists to prevent, and it would be written into the history as "Infinity".
+    /// </summary>
+    private static bool IsUsable(double watts) =>
+        watts >= 0 && !double.IsNaN(watts) && !double.IsInfinity(watts);
 }

@@ -48,20 +48,14 @@ public sealed class ProgramTests
     /// Redirects <see cref="Console.Out" /> for the duration of the call so the banner can be
     /// asserted, then restores the original writer even if Main throws.
     /// </summary>
+    /// <summary>
+    /// Runs the command with its own writer. Nothing process-wide is touched, so this stays correct however the
+    /// runner parallelises the assembly.
+    /// </summary>
     private static (int ExitCode, string Output) RunMain(string[] args)
     {
-        var original = Console.Out;
         using var captured = new StringWriter();
-
-        try
-        {
-            Console.SetOut(captured);
-            var exitCode = Program.Main(args);
-            return (exitCode, captured.ToString());
-        }
-        finally
-        {
-            Console.SetOut(original);
-        }
+        var exitCode = Program.Run(args, captured);
+        return (exitCode, captured.ToString());
     }
 }

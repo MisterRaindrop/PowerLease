@@ -188,6 +188,54 @@ public sealed class ScheduleTests
         Assert.False(schedule.EvaluateAt(Utc(2026, 11, 1, 9, 45), zone).IsInGuaranteedAwakeWindow);
     }
 
+    /// <summary>
+    /// A zone that springs forward at midnight local, as Cuba and Chile do.
+    /// </summary>
+    private static TimeZoneInfo MidnightTransitionZone()
+    {
+        var rule = TimeZoneInfo.AdjustmentRule.CreateAdjustmentRule(
+            DateTime.MinValue.Date,
+            DateTime.MaxValue.Date,
+            TimeSpan.FromHours(1),
+            TimeZoneInfo.TransitionTime.CreateFloatingDateRule(
+                new DateTime(1, 1, 1, 0, 0, 0), 3, 2, DayOfWeek.Sunday),
+            TimeZoneInfo.TransitionTime.CreateFloatingDateRule(
+                new DateTime(1, 1, 1, 0, 0, 0), 11, 1, DayOfWeek.Sunday));
+
+        return TimeZoneInfo.CreateCustomTimeZone(
+            "PowerLease Test (midnight DST)",
+            TimeSpan.Zero,
+            "PowerLease Test (midnight DST)",
+            "PLMS",
+            "PLMD",
+            [rule]);
+    }
+
+    [Fact]
+    public void A_window_widened_back_across_midnight_is_still_found()
+    {
+        // 2026-03-08 is the second Sunday in March, and in this zone the clock jumps from 00:00 to 01:00 that
+        // morning, so 00:15 does not exist. Widening the start to the earliest instant it could mean puts the
+        // window's beginning on the Saturday evening in UTC -- which means the instant being judged has a local
+        // date of Saturday while the window that covers it is anchored on Sunday. A search that only looked at
+        // today and yesterday would miss it, and the window the user asked for would silently never fire.
+        var zone = MidnightTransitionZone();
+        var schedule = new Schedule(
+            [new TimeWindow(new TimeOnly(0, 15), new TimeOnly(0, 45), DayOfWeekSet.Of(DayOfWeek.Sunday))]);
+
+        Assert.True(zone.IsInvalidTime(new DateTime(2026, 3, 8, 0, 15, 0)));
+
+        var instant = new DateTimeOffset(2026, 3, 7, 23, 30, 0, TimeSpan.Zero);
+
+        // The local date really is the Saturday, so the window can only be found by looking at tomorrow.
+        Assert.Equal(new DateTime(2026, 3, 7), TimeZoneInfo.ConvertTime(instant, zone).Date);
+
+        var evaluation = schedule.EvaluateAt(instant, zone);
+
+        Assert.True(evaluation.IsInGuaranteedAwakeWindow);
+        Assert.True(evaluation.WidenedForDaylightSavingTransition);
+    }
+
     [Fact]
     public void A_time_zone_is_required()
     {

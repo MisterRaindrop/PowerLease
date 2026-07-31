@@ -322,32 +322,49 @@ public sealed class InhibitKernelTests
     }
 
     [Fact]
-    public void The_published_state_can_be_read_while_the_loop_is_working()
+    public void The_published_state_is_never_observed_out_of_order_while_the_loop_is_working()
     {
-        // Answering a status query must never queue behind the mutation path, or a busy loop would make the
-        // tool look hung exactly when someone is trying to find out what it is doing.
+        // Answering a status query must not wait behind the mutation path. What can be asserted here is the
+        // weaker but still load-bearing half: a reader on another thread only ever sees whole snapshots, in
+        // order. The two loops are released together and the reader runs until the writer says stop, so a run
+        // where they never actually overlapped fails rather than passing silently -- which is what the earlier
+        // version of this test did whenever the reader finished first.
         var harness = new KernelHarness();
         var revisions = new List<long>();
+        var started = new ManualResetEventSlim(false);
+        var writerDone = false;
+
         var reader = new Thread(() =>
         {
-            for (var i = 0; i < 500; i++)
+            started.Wait();
+            while (!Volatile.Read(ref writerDone))
             {
                 revisions.Add(harness.Kernel.Snapshot.Revision);
             }
+
+            revisions.Add(harness.Kernel.Snapshot.Revision);
         });
 
         reader.Start();
+        started.Set();
+
         for (var i = 0; i < 500; i++)
         {
             harness.ConfirmAbsent("ssh");
             harness.Step();
         }
 
+        Volatile.Write(ref writerDone, true);
         reader.Join();
 
-        Assert.NotEmpty(revisions);
         Assert.Equal(revisions.OrderBy(revision => revision), revisions);
         Assert.Equal(500, harness.Kernel.Snapshot.Revision);
+
+        // Proof the reader really did run alongside the writer. Without this the ordering assertion above is
+        // satisfied by a list of five hundred zeroes.
+        Assert.True(
+            revisions.Distinct().Count() > 1,
+            $"the reader never overlapped the writer: it only ever saw revision {revisions[0]}");
     }
 
     [Fact]

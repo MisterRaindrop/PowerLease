@@ -5,10 +5,10 @@ namespace PowerLease.Application.Inhibitors;
 /// <summary>
 /// Holds the machine awake during the windows the user asked for.
 /// <para>
-/// The time zone is read through a provider on every evaluation rather than captured once. A machine that
-/// travels, or whose zone is corrected, must start honouring the new one on the next cycle -- and the
-/// provider deliberately clears the runtime's cached zone data, because otherwise a process started before
-/// the change would keep using the old one for as long as it lives.
+/// The time zone is read through a provider on every evaluation rather than captured once, so a machine that
+/// travels or has its zone corrected starts honouring the new one on the next cycle. The provider caches it and
+/// is refreshed by the host on the time-change event; clearing the runtime's zone cache on every read instead
+/// would be a process-wide side effect several times a minute.
 /// </para>
 /// </summary>
 public sealed class ScheduleEvaluator

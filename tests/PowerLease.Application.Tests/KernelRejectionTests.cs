@@ -145,23 +145,6 @@ public sealed class KernelRejectionTests
     }
 
     [Fact]
-    public void A_protection_history_write_that_fails_latches_a_fault()
-    {
-        // Losing the history is not a safety failure, but it is a failure, and a latched fault keeps the
-        // machine awake until it is understood.
-        var harness = new KernelHarness();
-        harness.Observe("ssh", harness.SshInhibitor());
-        var journal = Assert.Single(
-            harness.Step().Effects, candidate => candidate.Kind == EffectKind.RecordInhibitChange);
-
-        harness.Kernel.Apply(new EffectFinished(
-            new EffectCompletion(journal.EffectId, EffectOutcome.Failed, Error: "disk full")));
-        var result = harness.Step();
-
-        Assert.Contains(result.Snapshot.Faults, fault => fault.Key == "inhibit-journal");
-    }
-
-    [Fact]
     public void A_protection_change_is_recorded_with_the_reasons_and_the_revision()
     {
         var harness = new KernelHarness();

@@ -37,10 +37,18 @@ public sealed record KernelOptions
     public int ConsecutiveHealthyToClearTransient { get; init; } = 3;
 
     /// <summary>
-    /// Sources that must be reporting for a release to mean anything. Anything missing from this set is
-    /// simply not consulted; anything in it that goes quiet holds the machine awake.
+    /// Sources that must be reporting for a release to mean anything. Anything in this set that goes quiet
+    /// holds the machine awake; anything missing from it is simply never consulted.
+    /// <para>
+    /// Required, with no default, on purpose. Before a source has reported for the first time it contributes
+    /// nothing, so a kernel that expects nothing and has heard nothing gathers only confirmed absences and
+    /// concludes there is no reason to stay awake -- having heard from nobody at all. That is the correct
+    /// answer for a build genuinely watching nothing, and a silent fail-open for a host whose producers have
+    /// not finished starting. Making it required turns the difference into something the compiler asks about
+    /// rather than something a host can omit by accident.
+    /// </para>
     /// </summary>
-    public IReadOnlyList<string> ExpectedSources { get; init; } = [];
+    public required IReadOnlyList<string> ExpectedSources { get; init; }
 
     /// <summary>
     /// The inhibitor kinds some source in this configuration is actually evaluating. Reported so the

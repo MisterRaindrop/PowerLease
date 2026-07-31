@@ -21,6 +21,9 @@ internal sealed class HistoryFixture : IDisposable
 
     public FakeClock Clock { get; }
 
+    /// <summary>Exposed so a test can write a row the store's own mapper would refuse.</summary>
+    public string DatabasePath => _root.Paths.DatabasePath;
+
     public SqliteHistoryStore Store { get; }
 
     public void StartSession()

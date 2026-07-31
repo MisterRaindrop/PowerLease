@@ -25,7 +25,11 @@ internal sealed class FakeTimeZoneProvider : ITimeZoneProvider
 
     public Exception? Throws { get; set; }
 
+    public int RefreshCount { get; private set; }
+
     public TimeZoneInfo Current => Throws is null ? Zone : throw Throws;
+
+    public void Refresh() => RefreshCount++;
 }
 
 public sealed class ProtectedProcessEvaluatorTests
@@ -81,6 +85,38 @@ public sealed class ProtectedProcessEvaluatorTests
 
         var inhibitor = Assert.Single(report.Inhibitors);
         Assert.Contains("could not be read", inhibitor.Reason, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Every_unreadable_command_line_is_one_reason_between_them_not_one_each()
+    {
+        // A service cannot read most other accounts' command lines, so this is the ordinary case. One inhibitor
+        // per process would mean hundreds of allocations and a full sort every cycle, and a status output where
+        // the reason someone is looking for is buried.
+        var report = Evaluator(patterns: ["dotnet build"]).Evaluate(
+            ProcessSnapshot.Of(
+                new ProcessInfo(100, "a", null),
+                new ProcessInfo(101, "b", null),
+                new ProcessInfo(102, "c", null),
+                new ProcessInfo(103, "d", null),
+                new ProcessInfo(104, "e", null)),
+            Noon);
+
+        var inhibitor = Assert.Single(report.Inhibitors);
+        Assert.Contains("5 process(es)", inhibitor.Reason, StringComparison.Ordinal);
+        Assert.Contains("and 2 more", inhibitor.Detail!, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void A_real_match_is_still_listed_separately_from_the_unreadable_ones()
+    {
+        var report = Evaluator(patterns: ["dotnet build"]).Evaluate(
+            ProcessSnapshot.Of(
+                new ProcessInfo(100, "dotnet", "dotnet build -c Release"),
+                new ProcessInfo(101, "other", null)),
+            Noon);
+
+        Assert.Equal(2, report.Inhibitors.Count);
     }
 
     [Fact]
@@ -264,6 +300,10 @@ public sealed class ScheduleEvaluatorTests
             "PowerLease Test -08", TimeSpan.FromHours(-8), "PowerLease Test -08", "PLTM8");
 
         Assert.Empty(evaluator.Evaluate(Utc(2)).Inhibitors);
+
+        // The evaluator holds no zone of its own, so it never needs telling; refreshing the provider is the
+        // host's job on the time-change event.
+        Assert.Equal(0, provider.RefreshCount);
     }
 
     [Fact]
@@ -484,6 +524,7 @@ public sealed class EnergyEstimatorTests
 
     [Theory]
     [InlineData(double.NaN)]
+    [InlineData(double.PositiveInfinity)]
     [InlineData(-1)]
     public void A_baseline_that_is_not_a_usable_number_is_ignored(double baseline)
     {
@@ -494,6 +535,7 @@ public sealed class EnergyEstimatorTests
 
     [Theory]
     [InlineData(double.NaN)]
+    [InlineData(double.PositiveInfinity)]
     [InlineData(-5)]
     public void A_reading_that_is_not_a_usable_number_falls_back_to_the_baseline(double measured)
     {

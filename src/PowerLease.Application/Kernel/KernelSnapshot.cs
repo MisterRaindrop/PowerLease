@@ -35,7 +35,9 @@ public sealed class KernelSnapshot
         emergencyInhibitRaised: false,
         emergencyInhibitReason: null,
         gracePeriodActive: false,
-        configGeneration: 0);
+        configGeneration: 0,
+        historyWriteFailures: 0,
+        lastHistoryWriteError: null);
 
     public KernelSnapshot(
         long revision,
@@ -47,7 +49,9 @@ public sealed class KernelSnapshot
         bool emergencyInhibitRaised,
         string? emergencyInhibitReason,
         bool gracePeriodActive,
-        long configGeneration)
+        long configGeneration,
+        long historyWriteFailures,
+        string? lastHistoryWriteError)
     {
         ArgumentNullException.ThrowIfNull(decision);
         ArgumentNullException.ThrowIfNull(faults);
@@ -64,6 +68,8 @@ public sealed class KernelSnapshot
         EmergencyInhibitReason = emergencyInhibitReason;
         GracePeriodActive = gracePeriodActive;
         ConfigGeneration = configGeneration;
+        HistoryWriteFailures = historyWriteFailures;
+        LastHistoryWriteError = lastHistoryWriteError;
     }
 
     /// <summary>Increases with every evaluation. Only the kernel ever moves it.</summary>
@@ -86,6 +92,18 @@ public sealed class KernelSnapshot
     public bool GracePeriodActive { get; }
 
     public long ConfigGeneration { get; }
+
+    /// <summary>
+    /// How many times the protection history could not be written.
+    /// <para>
+    /// Reported rather than latched as a fault. Losing the record of past decisions does not make the current
+    /// decision untrustworthy, so it must not hold the machine awake -- but it must be visible, or a database
+    /// that has been failing to write for a month looks exactly like one that has had nothing to say.
+    /// </para>
+    /// </summary>
+    public long HistoryWriteFailures { get; }
+
+    public string? LastHistoryWriteError { get; }
 
     public bool ShouldHold => Decision.ShouldHold;
 

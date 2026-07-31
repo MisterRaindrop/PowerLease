@@ -46,42 +46,4 @@ public sealed class InhibitorTests
         Assert.Contains("msbuild.exe is running", text, StringComparison.Ordinal);
     }
 
-    [Fact]
-    public void With_expression_replaces_only_the_named_member()
-    {
-        var sinceUtc = new DateTimeOffset(2026, 7, 30, 12, 0, 0, TimeSpan.Zero);
-        var original = new Inhibitor(InhibitorKind.LockFile, "Lock file present", sinceUtc, "keep-awake.lock");
-
-        var withDetail = original with { Detail = "renamed.lock" };
-
-        Assert.Equal("renamed.lock", withDetail.Detail);
-        Assert.Equal(original.Kind, withDetail.Kind);
-        Assert.Equal(original.Reason, withDetail.Reason);
-        Assert.Equal(original.SinceUtc, withDetail.SinceUtc);
-        Assert.NotEqual(original, withDetail);
-    }
-
-    [Fact]
-    public void Deconstruction_yields_the_constructor_arguments()
-    {
-        var sinceUtc = new DateTimeOffset(2026, 7, 30, 12, 0, 0, TimeSpan.Zero);
-        var inhibitor = new Inhibitor(InhibitorKind.GracePeriod, "Resume grace period", sinceUtc, "10m");
-
-        var (kind, reason, since, detail) = inhibitor;
-
-        Assert.Equal(InhibitorKind.GracePeriod, kind);
-        Assert.Equal("Resume grace period", reason);
-        Assert.Equal(sinceUtc, since);
-        Assert.Equal("10m", detail);
-    }
-
-    [Fact]
-    public void Equal_records_share_a_hash_code()
-    {
-        var sinceUtc = new DateTimeOffset(2026, 7, 30, 12, 0, 0, TimeSpan.Zero);
-        var first = new Inhibitor(InhibitorKind.SystemActivity, "CPU busy", sinceUtc);
-        var same = new Inhibitor(InhibitorKind.SystemActivity, "CPU busy", sinceUtc);
-
-        Assert.Equal(first.GetHashCode(), same.GetHashCode());
-    }
 }

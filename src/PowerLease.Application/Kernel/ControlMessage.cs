@@ -33,7 +33,13 @@ public sealed record ServiceStarted(string Reason) : ControlMessage;
 /// <summary>
 /// Configuration has been replaced. Results computed under the old one are no longer admissible.
 /// </summary>
-public sealed record ConfigurationReplaced(long ConfigGeneration) : ControlMessage;
+/// <param name="ExpectedSources">
+/// The producers the host will be running from now on. Carried here because the kernel has to forget the ones
+/// that are gone: a source left behind after its rule was switched off goes stale and then holds the machine
+/// awake for ever, blaming something that is no longer configured.
+/// </param>
+public sealed record ConfigurationReplaced(long ConfigGeneration, IReadOnlyList<string> ExpectedSources)
+    : ControlMessage;
 
 /// <summary>
 /// The time zone or the system clock changed.

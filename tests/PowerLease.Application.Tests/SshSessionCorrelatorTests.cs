@@ -174,6 +174,25 @@ public sealed class SshSessionCorrelatorTests
         Assert.Empty(accepted.Report.Inhibitors);
     }
 
+    [Theory]
+    [InlineData(SshLogChannelState.Discontinuous)]
+    [InlineData(SshLogChannelState.TransientFailure)]
+    public void The_opt_in_accepts_connection_state_alone_never_a_broken_log(SshLogChannelState state)
+    {
+        // tcpOnlyConfirmed says "I accept that an empty connection table means nobody is connected". It does not
+        // say "I accept a log that has lost entries". Collapsing the switch so it did would make a rolled-over
+        // log plus an empty table a positive claim of absence -- and a login inside the gap is exactly the case
+        // the connection table cannot see, which is the release-too-early failure.
+        var result = Correlator(tcpOnlyConfirmed: true).Evaluate(
+            TcpSnapshot.Of(),
+            SshLogRead.Unavailable(state, "the log lost entries"),
+            At(0),
+            Noon);
+
+        Assert.False(result.Report.IsDeterminate);
+        Assert.Null(result.Bookmark);
+    }
+
     [Fact]
     public void A_connection_table_that_could_not_be_read_is_never_taken_as_nobody_connected()
     {

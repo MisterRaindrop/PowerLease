@@ -28,9 +28,11 @@ internal sealed class TempRoot : IDisposable
                 Directory.Delete(Path, recursive: true);
             }
         }
-        catch (IOException)
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
         {
-            // A leftover temporary directory is not worth failing a test over.
+            // A leftover temporary directory is not worth failing a test over -- and on Windows a read-only
+            // leftover throws UnauthorizedAccessException, which would replace the real failure message of a
+            // test that was already unwinding.
         }
     }
 }
