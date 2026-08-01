@@ -11,8 +11,22 @@ public sealed record PowerCapabilitySnapshot(
     bool? RunningOnBattery,
     IReadOnlyList<string> Unavailable);
 
+/// <summary>
+/// Reads what the machine's power configuration allows.
+/// <para>
+/// An interface because the host has to answer <c>powerlease wake-status</c> from it, and because a fake is the
+/// only way to test the case that matters: a fact that could not be determined must reach the user as "unknown"
+/// rather than as "no". Sending someone to change a setting that was never the problem is the failure this
+/// guards against.
+/// </para>
+/// </summary>
+public interface IPowerCapabilityProbe
+{
+    PowerCapabilitySnapshot Read();
+}
+
 /// <summary>Reads the active Windows power scheme and hardware power capabilities.</summary>
-public sealed class PowerCapabilityProbe
+public sealed class PowerCapabilityProbe : IPowerCapabilityProbe
 {
     private const uint ErrorSuccess = 0;
     private const uint RegDword = 4;

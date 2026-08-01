@@ -63,6 +63,29 @@ public sealed class WindowsAdapterTests
     }
 
     [Fact]
+    public void The_power_configuration_is_read_as_facts_or_admitted_gaps_never_as_a_silent_no()
+    {
+        // "The power plan forbids this" and "nobody could find out" call for different actions from the user,
+        // so a fact that could not be determined must stay null and say which call failed.
+        IPowerCapabilityProbe probe = new PowerCapabilityProbe();
+
+        var snapshot = probe.Read();
+
+        var facts = new[]
+        {
+            snapshot.SystemRequiredHonouredOnMains,
+            snapshot.SystemRequiredHonouredOnBattery,
+            snapshot.ModernStandby,
+            snapshot.RunningOnBattery
+        };
+
+        // Every fact is either known or listed as unavailable; a null with nothing said about it would reach the
+        // user as a blank that reads like a no.
+        Assert.Equal(facts.Count(fact => fact is null) > 0, snapshot.Unavailable.Count > 0);
+        Assert.All(snapshot.Unavailable, detail => Assert.False(string.IsNullOrWhiteSpace(detail)));
+    }
+
+    [Fact]
     public void A_lock_file_that_exists_is_reported_present_and_one_that_does_not_is_reported_absent()
     {
         var probe = new WindowsLockFileProbe();
