@@ -50,6 +50,7 @@ public sealed class InhibitKernel
     private long _configGeneration;
     private long _nextEffectId;
     private MonotonicStamp? _resyncDemandedAt;
+    private Guid? _lastSeenEpoch;
     private long _historyWriteFailures;
     private string? _lastHistoryWriteError;
 
@@ -174,25 +175,33 @@ public sealed class InhibitKernel
     public void Apply(ControlMessage message)
     {
         ArgumentNullException.ThrowIfNull(message);
+        Handle(message);
+    }
 
+    private void Handle(ControlMessage message)
+    {
         var now = _clock.Now;
 
         switch (message)
         {
             case ResumedFromSleep resumed:
+                // Grace first, then let go of the request. Ordered this way because the unconditional reason to
+                // stay awake must be in place before the thing holding the machine awake is dropped; the reverse
+                // order leaves a window with neither if anything in between goes wrong.
+                BeginGrace(now, _options.ResumeGracePeriod, $"resumed: {resumed.Reason}");
+
                 // Every observation describes a machine that has since been asleep, and the operating
                 // system dropped the power request when it suspended.
                 DiscardEverySourceObservation($"the machine resumed: {resumed.Reason}");
                 ReestablishLeases(now);
                 _power.Invalidate();
-                _grace.Begin(now, _options.ResumeGracePeriod, $"resumed: {resumed.Reason}");
                 break;
 
             case ServiceStarted started:
+                BeginGrace(now, _options.StartupGracePeriod, $"service started: {started.Reason}");
                 DiscardEverySourceObservation($"the service started: {started.Reason}");
                 ReestablishLeases(now);
                 _power.Invalidate();
-                _grace.Begin(now, _options.StartupGracePeriod, $"service started: {started.Reason}");
                 break;
 
             case ConfigurationReplaced replaced:
@@ -285,6 +294,8 @@ public sealed class InhibitKernel
         var now = _clock.Now;
         var nowUtc = _clock.UtcNow;
 
+        NoticeClockRestart(now);
+
         ExpireLeases(now, nowUtc);
         RefreshLeaseCheckpoints(now, nowUtc);
         DropAbandonedEffects();
@@ -313,7 +324,14 @@ public sealed class InhibitKernel
         var decision = InhibitAggregator.Aggregate(reports, _options.CoveredKinds, nowUtc);
 
         var previous = _power.State;
-        var state = _power.Ensure(decision.ShouldHold);
+
+        // Read once more, immediately before acting. The latch is the one thing another thread may change
+        // without waiting for a turn, so it can be raised after its report was gathered and before the request
+        // is let go -- and letting go while an alarm is up is precisely what the latch exists to prevent. This
+        // narrows the window to the few instructions below rather than the whole evaluation; closing it entirely
+        // would mean locking the raise path, which has to stay lock-free for a producer that cannot wait.
+        var shouldHold = decision.ShouldHold || _emergency.IsRaised;
+        var state = _power.Ensure(shouldHold);
 
         if (state == ProtectionState.Unprotected)
         {
@@ -499,6 +517,48 @@ public sealed class InhibitKernel
     /// than for less.
     /// </para>
     /// </summary>
+    /// <summary>
+    /// Notice a change of monotonic clock the kernel was never told about, and treat it as a resume.
+    /// <para>
+    /// The epoch changes when the machine wakes or the service restarts, and both mean the operating system has
+    /// already dropped the power request. Relying on being told is not enough: if that notification is missed,
+    /// the coordinator goes on believing it holds a request that no longer exists, so every later Ensure returns
+    /// early without reacquiring and the machine reports itself protected while it is not. Watching the clock
+    /// costs a comparison per turn and removes the dependency altogether.
+    /// </para>
+    /// </summary>
+    private void NoticeClockRestart(MonotonicStamp now)
+    {
+        if (_lastSeenEpoch == now.EpochId)
+        {
+            return;
+        }
+
+        var first = _lastSeenEpoch is null;
+        _lastSeenEpoch = now.EpochId;
+
+        if (first)
+        {
+            // The first evaluation. There is nothing from an earlier clock to throw away, no request to let go of
+            // and no lease to re-establish, so all that is owed is the unconditional hold that covers a service
+            // which has just come up and heard from nobody yet. Doing the full resume handling here would discard
+            // the first reports its producers had already delivered.
+            BeginGrace(now, _options.StartupGracePeriod, "the service has begun evaluating");
+            return;
+        }
+
+        Handle(new ResumedFromSleep("the monotonic clock restarted without notice"));
+    }
+
+    /// <summary>Start a grace period, unless it has been configured away.</summary>
+    private void BeginGrace(MonotonicStamp now, TimeSpan duration, string reason)
+    {
+        if (duration > TimeSpan.Zero)
+        {
+            _grace.Begin(now, duration, reason);
+        }
+    }
+
     private void ReestablishLeases(MonotonicStamp now)
     {
         var nowUtc = _clock.UtcNow;
@@ -642,6 +702,13 @@ public sealed class InhibitKernel
             LastRenewedAtUtc = nowUtc,
             LastRenewDuration = command.Duration,
             ExpiresAtUtc = nowUtc + remaining,
+
+            // Raised when this renewal grants more than the lease has ever held, because the stored duration is
+            // the ceiling a restored checkpoint is validated against. Leaving it at the first grant would make a
+            // longer renewal look self-contradictory after a restart and silently shorten the lease.
+            OriginalDuration = remaining > tracked.Lease.OriginalDuration
+                ? remaining
+                : tracked.Lease.OriginalDuration,
             RemainingAtCheckpoint = remaining,
             CheckpointUtc = nowUtc
         };

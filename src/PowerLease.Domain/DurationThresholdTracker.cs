@@ -93,7 +93,11 @@ public sealed class DurationThresholdTracker
         // Walk backwards from the newest sample for as long as the evidence is unbroken: every
         // sample at or below the threshold, and no gap wide enough to have hidden a burst. Where the
         // walk stops is the earliest instant quiet can be claimed from.
-        var quietStart = newest.At.Elapsed;
+        // From now, not from the newest sample. Starting at the sample would credit the time since it was taken
+        // as quiet even when that sample was itself busy: one measurement above the threshold followed by silence
+        // for the required duration would report the machine as quiet throughout, letting an activity source
+        // confirm absence while the work that produced the measurement is still running.
+        var quietStart = now.Elapsed;
         var previous = now.Elapsed;
         var sawActivity = false;
 

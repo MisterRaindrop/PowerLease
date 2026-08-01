@@ -45,7 +45,15 @@ public sealed record KeepAwakeLease
     /// <summary>The monotonic clock epoch the lease was last measured in.</summary>
     public required Guid EpochId { get; init; }
 
-    /// <summary>The duration originally granted, and the fallback when a checkpoint is unusable.</summary>
+    /// <summary>
+    /// The largest hold ever granted for this lease at one time.
+    /// <para>
+    /// Two jobs: the fallback when a checkpoint is unusable, and the ceiling a restored checkpoint is checked
+    /// against. It therefore has to rise when a renewal grants more than the lease began with -- otherwise a
+    /// one-hour lease renewed for three would come back from a restart with one hour, and protection the user
+    /// was told they had would end two hours early.
+    /// </para>
+    /// </summary>
     public required TimeSpan OriginalDuration { get; init; }
 
     /// <summary>The duration asked for by the most recent renewal, for auditing.</summary>

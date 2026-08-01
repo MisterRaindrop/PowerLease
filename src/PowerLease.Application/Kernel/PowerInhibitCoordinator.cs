@@ -55,7 +55,7 @@ public sealed class PowerInhibitCoordinator
         var generation = ++_generation;
         AcquireCount++;
 
-        switch (_inhibitor.Acquire(generation))
+        switch (Attempt(generation))
         {
             case PowerInhibitResult.Held:
                 _heldGeneration = generation;
@@ -72,7 +72,8 @@ public sealed class PowerInhibitCoordinator
                 // It may or may not have taken effect. Close this generation outright rather than
                 // guessing how many clears the reference count needs, and let the next cycle try again
                 // on a fresh generation.
-                _inhibitor.Close(generation);
+                _heldGeneration = generation;
+                CloseIfHeld();
                 State = ProtectionState.Unprotected;
                 break;
         }
@@ -94,11 +95,56 @@ public sealed class PowerInhibitCoordinator
         State = ProtectionState.Released;
     }
 
+    /// <summary>
+    /// Ask the adapter to take out a request, treating a throw as an uncertain outcome.
+    /// <para>
+    /// The adapter is meant not to throw, but an exception escaping here would leave the kernel unable to latch
+    /// its power-request fault and unable to try again. Uncertain is the right reading of a throw anyway: it is
+    /// not known whether the request took effect, so the handle is closed outright.
+    /// </para>
+    /// </summary>
+    private PowerInhibitResult Attempt(long generation)
+    {
+        try
+        {
+            return _inhibitor.Acquire(generation);
+        }
+#pragma warning disable CA1031 // Any adapter failure must become a state, never an escape.
+        catch (Exception)
+#pragma warning restore CA1031
+        {
+            return PowerInhibitResult.Uncertain;
+        }
+    }
+
+    /// <summary>
+    /// Let go of the outstanding request.
+    /// <para>
+    /// The generation is cleared whatever happens. If Close released the request and then threw, keeping the
+    /// generation would make every later Ensure return early without reacquiring -- the machine reporting itself
+    /// protected while holding nothing, which is the worst of the available outcomes. Forgetting a handle that
+    /// was not actually closed leaks one request for the life of the process; that only keeps the machine awake.
+    /// </para>
+    /// </summary>
     private void CloseIfHeld()
     {
-        if (_heldGeneration is { } generation)
+        if (_heldGeneration is not { } generation)
+        {
+            return;
+        }
+
+        try
         {
             _inhibitor.Close(generation);
+        }
+#pragma warning disable CA1031 // Any adapter failure must become a state, never an escape.
+        catch (Exception)
+#pragma warning restore CA1031
+        {
+            // Nothing to do but stop believing the request is held.
+        }
+        finally
+        {
             _heldGeneration = null;
         }
     }
