@@ -51,6 +51,16 @@ public sealed record ConfigurationReplaced(long ConfigGeneration, IReadOnlyList<
 /// </summary>
 public sealed record TimeAdjusted(string Reason) : ControlMessage;
 
+/// <summary>
+/// Reports from a source were dropped before the kernel saw them, because its queue was full.
+/// <para>
+/// Delivered on the control channel, which is never dropped, precisely because the thing it reports is a drop.
+/// The source cannot be believed until it reports again: the observations that were lost may have been the ones
+/// saying something was happening, and what is still held may be an older report saying nothing was.
+/// </para>
+/// </summary>
+public sealed record SourceReportsDropped(string SourceId, long Count) : ControlMessage;
+
 /// <summary>A failure worth latching. While it is latched the machine stays awake.</summary>
 public sealed record FaultObserved(string Key, FaultSeverity Severity, string Message) : ControlMessage;
 
