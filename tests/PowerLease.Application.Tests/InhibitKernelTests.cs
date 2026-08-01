@@ -326,29 +326,40 @@ public sealed class InhibitKernelTests
     {
         // Answering a status query must not wait behind the mutation path. What can be asserted here is the
         // weaker but still load-bearing half: a reader on another thread only ever sees whole snapshots, in
-        // order. The two loops are released together and the reader runs until the writer says stop, so a run
-        // where they never actually overlapped fails rather than passing silently -- which is what the earlier
-        // version of this test did whenever the reader finished first.
+        // order.
+        //
+        // The overlap is made certain rather than hoped for. An earlier version of this test simply started both
+        // and checked afterwards that they had run together, which held locally and failed on a loaded CI runner
+        // where the reader was not scheduled until the writer had finished -- so every recorded revision was the
+        // last one and the ordering assertion was satisfied by a list of identical values. Here the writer blocks
+        // after its first turn until the reader has recorded something, which gives up the core and leaves the
+        // reader no way not to run.
         var harness = new KernelHarness();
         var revisions = new List<long>();
-        var started = new ManualResetEventSlim(false);
+        var readerHasRecorded = new ManualResetEventSlim(false);
         var writerDone = false;
 
         var reader = new Thread(() =>
         {
-            started.Wait();
             while (!Volatile.Read(ref writerDone))
             {
                 revisions.Add(harness.Kernel.Snapshot.Revision);
+                readerHasRecorded.Set();
             }
 
             revisions.Add(harness.Kernel.Snapshot.Revision);
         });
 
         reader.Start();
-        started.Set();
 
-        for (var i = 0; i < 500; i++)
+        harness.ConfirmAbsent("ssh");
+        harness.Step();
+
+        Assert.True(
+            readerHasRecorded.Wait(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken),
+            "the reader thread never ran");
+
+        for (var i = 0; i < 499; i++)
         {
             harness.ConfirmAbsent("ssh");
             harness.Step();
@@ -356,12 +367,10 @@ public sealed class InhibitKernelTests
 
         Volatile.Write(ref writerDone, true);
         reader.Join();
+        readerHasRecorded.Dispose();
 
         Assert.Equal(revisions.OrderBy(revision => revision), revisions);
         Assert.Equal(500, harness.Kernel.Snapshot.Revision);
-
-        // Proof the reader really did run alongside the writer. Without this the ordering assertion above is
-        // satisfied by a list of five hundred zeroes.
         Assert.True(
             revisions.Distinct().Count() > 1,
             $"the reader never overlapped the writer: it only ever saw revision {revisions[0]}");
