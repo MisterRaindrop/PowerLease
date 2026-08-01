@@ -7,4 +7,9 @@
     <ProjectReference Include="..\PowerLease.Domain\PowerLease.Domain.csproj" />
     <ProjectReference Include="..\PowerLease.Application\PowerLease.Application.csproj" />
   </ItemGroup>
+
+  <ItemGroup>
+    <!-- System.Diagnostics.Eventing.Reader, for reading the OpenSSH operational log. -->
+    <PackageReference Include="System.Diagnostics.EventLog" />
+  </ItemGroup>
 </Project>
