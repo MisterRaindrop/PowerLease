@@ -208,6 +208,15 @@ public sealed class InhibitKernel
                 DiscardEverySourceObservation($"the clock or time zone changed: {adjusted.Reason}");
                 break;
 
+            case SourceReportsDropped dropped:
+                Distrust(
+                    dropped.SourceId,
+                    default,
+                    adoptBaseline: false,
+                    ObservationDisposition.DistrustedSequenceGap,
+                    $"{dropped.Count} report(s) from '{dropped.SourceId}' were dropped before they arrived.");
+                break;
+
             case FaultObserved fault:
                 _faults.Report(fault.Key, fault.Severity, fault.Message, _clock.UtcNow);
                 break;
