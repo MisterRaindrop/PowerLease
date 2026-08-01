@@ -849,11 +849,18 @@ public sealed class InhibitKernel
                 break;
 
             case EffectOutcome.AlreadyDone:
-                // A client retrying after a lost reply, not a second request. Drop the copy created for
-                // the retry and hand back the answer the first attempt produced.
-                if (tracked?.Commit == LeaseCommitState.Provisional)
+                // A client retrying after a lost reply, not a second request. Hand back the answer the first
+                // attempt produced, and undo whatever this attempt put in place.
+                //
+                // Both lease states have to be handled, not just the provisional one. A retried release leaves
+                // the lease waiting for a write that the database says already happened, and a lease waiting
+                // for that goes on holding the machine awake while expiry deliberately skips it -- so the one
+                // request whose whole purpose is to let the machine sleep would pin it awake instead. Retrying
+                // is exactly what the idempotency record exists to make safe, so this is reachable by design.
+                if (tracked?.Commit is LeaseCommitState.Provisional or LeaseCommitState.ReleasePending)
                 {
                     _leases.Remove(leaseId);
+                    _faults.Clear(PersistFaultKey(leaseId));
                 }
 
                 _pendingResults.Add(new LeaseCommandResult(
