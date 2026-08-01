@@ -47,6 +47,12 @@ internal sealed class FakePowerInhibitor : IPowerInhibitor
 
     public List<long> Closed { get; } = [];
 
+    /// <summary>
+    /// Raises the kernel's emergency latch from inside the next Close, which is the only way to land in the
+    /// window between the decision being taken and the request being let go.
+    /// </summary>
+    public InhibitKernel? RaiseBeforeNextClose { get; set; }
+
     /// <summary>Queue one outcome for the next acquisition, ahead of <see cref="Default" />.</summary>
     public void Next(PowerInhibitResult result) => _scripted.Enqueue(result);
 
@@ -56,7 +62,16 @@ internal sealed class FakePowerInhibitor : IPowerInhibitor
         return _scripted.Count > 0 ? _scripted.Dequeue() : Default;
     }
 
-    public void Close(long generation) => Closed.Add(generation);
+    public void Close(long generation)
+    {
+        Closed.Add(generation);
+
+        if (RaiseBeforeNextClose is { } kernel)
+        {
+            RaiseBeforeNextClose = null;
+            kernel.RaiseEmergencyInhibit("a source saw something alarming");
+        }
+    }
 }
 
 /// <summary>
@@ -70,10 +85,14 @@ internal sealed class KernelHarness
 
     public KernelHarness(KernelOptions? options = null)
     {
+        // No startup grace by default. The kernel notices its own first evaluation and holds unconditionally for
+        // fifteen minutes, which is right for a service and unhelpful for a test that is about something else.
+        // The tests that are about the grace period ask for one.
         Options = options ?? new KernelOptions
         {
             ObservationFreshness = TimeSpan.FromSeconds(30),
             HeartbeatFreshness = TimeSpan.FromSeconds(60),
+            StartupGracePeriod = TimeSpan.Zero,
             ExpectedSources = ["ssh"],
             CoveredKinds = [InhibitorKind.SshSession, InhibitorKind.CliLease]
         };

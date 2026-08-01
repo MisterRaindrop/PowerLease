@@ -41,7 +41,13 @@ public sealed class GracePeriodGuard
         ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(duration, TimeSpan.Zero);
         ArgumentException.ThrowIfNullOrEmpty(reason);
 
-        var candidate = new MonotonicStamp(now.EpochId, now.Elapsed + duration);
+        // Saturating rather than wrapping. Adding a large duration to a large elapsed time can overflow, and an
+        // exception escaping here would leave the caller having recorded no reason to stay awake at all -- on the
+        // one path whose entire purpose is to record one unconditionally.
+        var remaining = TimeSpan.MaxValue - now.Elapsed;
+        var candidate = new MonotonicStamp(
+            now.EpochId,
+            duration < remaining ? now.Elapsed + duration : TimeSpan.MaxValue);
 
         if (_expiresAt is { } existing
             && existing.EpochId == now.EpochId

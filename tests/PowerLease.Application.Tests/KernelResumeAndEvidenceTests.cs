@@ -89,7 +89,8 @@ public sealed class KernelResumeAndEvidenceTests
         var harness = new KernelHarness(new KernelOptions
         {
             ExpectedSources = ["ssh", "activity"],
-            CoveredKinds = [InhibitorKind.SshSession]
+            CoveredKinds = [InhibitorKind.SshSession],
+            StartupGracePeriod = TimeSpan.Zero
         });
 
         Assert.True(harness.Step().Snapshot.ShouldHold);
@@ -108,7 +109,7 @@ public sealed class KernelResumeAndEvidenceTests
         // then decides on its own, which is what it would do without PowerLease installed. The hazard was never
         // this behaviour but the silence of it -- the property is required with no default, so a host cannot
         // arrive here by forgetting to name its producers.
-        var harness = new KernelHarness(new KernelOptions { ExpectedSources = [] });
+        var harness = new KernelHarness(new KernelOptions { ExpectedSources = [], StartupGracePeriod = TimeSpan.Zero });
 
         Assert.False(harness.Step().Snapshot.ShouldHold);
     }
@@ -143,7 +144,8 @@ public sealed class KernelResumeAndEvidenceTests
         {
             ExpectedSources = ["ssh", "activity"],
             ObservationFreshness = TimeSpan.FromSeconds(30),
-            HeartbeatFreshness = TimeSpan.FromSeconds(60)
+            HeartbeatFreshness = TimeSpan.FromSeconds(60),
+            StartupGracePeriod = TimeSpan.Zero
         });
 
         harness.ConfirmAbsent("ssh");
@@ -202,7 +204,8 @@ public sealed class KernelResumeAndEvidenceTests
             ExpectedSources = ["ssh"],
             ObservationFreshness = TimeSpan.FromSeconds(30),
             HeartbeatFreshness = TimeSpan.FromSeconds(60),
-            ConsecutiveHealthyToClearTransient = 1
+            ConsecutiveHealthyToClearTransient = 1,
+            StartupGracePeriod = TimeSpan.Zero
         });
 
         harness.ConfirmAbsent("ssh");

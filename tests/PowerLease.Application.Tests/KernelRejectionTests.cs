@@ -51,7 +51,19 @@ public sealed class KernelRejectionTests
     {
         // The operating system dropped the power request when the previous process died, so the machine was
         // unprotected for however long the restart took, and no source has reported since.
-        var harness = new KernelHarness();
+        var harness = new KernelHarness(new KernelOptions
+        {
+            ExpectedSources = ["ssh"],
+            ObservationFreshness = TimeSpan.FromSeconds(30),
+            HeartbeatFreshness = TimeSpan.FromSeconds(60),
+            StartupGracePeriod = TimeSpan.FromMinutes(15)
+        });
+
+        // The kernel notices its own first evaluation and treats it as a start, so wait that one out before
+        // testing what an explicit notification does.
+        harness.ConfirmAbsent("ssh");
+        harness.Step();
+        harness.Clock.Advance(harness.Options.StartupGracePeriod);
         harness.ConfirmAbsent("ssh");
         Assert.False(harness.Step().Snapshot.ShouldHold);
 
