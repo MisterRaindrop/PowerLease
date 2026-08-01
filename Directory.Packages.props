@@ -14,6 +14,12 @@
     <PackageVersion Include="Microsoft.Extensions.Hosting.WindowsServices" Version="10.0.10" />
     <PackageVersion Include="Microsoft.Data.Sqlite" Version="10.0.10" />
     <PackageVersion Include="System.CommandLine" Version="2.0.10" />
+
+    <!--
+      Reading the OpenSSH operational log. Not part of the framework: System.Diagnostics.Eventing.Reader
+      ships as a package, so the SSH detection cannot see a login without it.
+    -->
+    <PackageVersion Include="System.Diagnostics.EventLog" Version="10.0.10" />
     <!--
       WiX extensions. The toolset itself is pinned via the Sdk attribute in each .wixproj
       and must stay on the same major version as these extensions.

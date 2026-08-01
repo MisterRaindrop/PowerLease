@@ -193,6 +193,36 @@ public sealed class KernelLeaseCommandTests
     }
 
     [Fact]
+    public void A_retried_release_lets_the_machine_sleep_instead_of_pinning_it_awake()
+    {
+        // Retrying is what the idempotency record exists to make safe, so this is reachable by design. The
+        // database says the release already happened; if the lease were left waiting for that write it would go
+        // on holding the machine awake -- and expiry deliberately skips a lease in that state, so the one
+        // request whose whole purpose is to let the machine sleep would pin it awake for good.
+        var harness = new KernelHarness();
+        harness.ConfirmAbsent("ssh");
+        harness.Kernel.Execute(Create(harness));
+        var created = Assert.Single(harness.Step().Effects, candidate => candidate.Kind == EffectKind.PersistLease);
+        harness.Kernel.Apply(new EffectFinished(new EffectCompletion(created.EffectId, EffectOutcome.Succeeded)));
+        harness.Step();
+
+        harness.Kernel.Execute(Create(harness, "req-2") with { Kind = LeaseCommandKind.Release });
+        var release = Assert.Single(
+            harness.Step().Effects, candidate => candidate.Kind == EffectKind.PersistLeaseRelease);
+
+        harness.Kernel.Apply(new EffectFinished(
+            new EffectCompletion(release.EffectId, EffectOutcome.AlreadyDone)));
+
+        harness.ConfirmAbsent("ssh");
+        var result = harness.Step();
+
+        Assert.Equal(LeaseCommandStatus.AlreadyDone, Assert.Single(result.CompletedCommands).Status);
+        Assert.DoesNotContain(
+            result.Snapshot.Decision.Inhibitors, inhibitor => inhibitor.Kind == InhibitorKind.CliLease);
+        Assert.False(result.Snapshot.ShouldHold);
+    }
+
+    [Fact]
     public void The_same_request_identifier_used_for_different_content_is_refused()
     {
         var harness = new KernelHarness();
