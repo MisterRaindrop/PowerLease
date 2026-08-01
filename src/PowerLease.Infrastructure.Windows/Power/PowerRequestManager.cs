@@ -149,9 +149,18 @@ public sealed class PowerRequestManager : IPowerInhibitor
         public string SimpleReasonString;
     }
 
+    /// <summary>
+    /// POWER_REQUEST_TYPE. The values matter and are not in the order one would guess: display comes first, so
+    /// zero is a request to keep the SCREEN on, not the machine. Getting this wrong is invisible -- a display
+    /// request keeps the system awake as a side effect, so a machine would still stay up and the mistake would
+    /// only show as the wrong category in powercfg /requests and a lit screen on a headless machine.
+    /// </summary>
     private enum PowerRequestType
     {
-        SystemRequired = 0
+        DisplayRequired = 0,
+        SystemRequired = 1,
+        AwayModeRequired = 2,
+        ExecutionRequired = 3
     }
 
     private sealed class SafePowerRequestHandle : SafeHandleZeroOrMinusOneIsInvalid
