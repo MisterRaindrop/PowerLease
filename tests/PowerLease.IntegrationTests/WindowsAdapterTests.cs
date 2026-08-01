@@ -67,7 +67,9 @@ public sealed class WindowsAdapterTests
     {
         // "The power plan forbids this" and "nobody could find out" call for different actions from the user,
         // so a fact that could not be determined must stay null and say which call failed.
-        IPowerCapabilityProbe probe = new PowerCapabilityProbe();
+        // Declared concretely because the analyser insists; the interface exists for the host to inject and
+        // for a fake to stand in, which is production's concern rather than this test's.
+        var probe = new PowerCapabilityProbe();
 
         var snapshot = probe.Read();
 
@@ -81,7 +83,7 @@ public sealed class WindowsAdapterTests
 
         // Every fact is either known or listed as unavailable; a null with nothing said about it would reach the
         // user as a blank that reads like a no.
-        Assert.Equal(facts.Count(fact => fact is null) > 0, snapshot.Unavailable.Count > 0);
+        Assert.Equal(facts.Any(fact => fact is null), snapshot.Unavailable.Count > 0);
         Assert.All(snapshot.Unavailable, detail => Assert.False(string.IsNullOrWhiteSpace(detail)));
     }
 
