@@ -104,7 +104,7 @@ public sealed class KernelRestartTests
 
         harness.Clock.Advance(TimeSpan.FromMinutes(2));
         harness.ConfirmAbsent("ssh");
-        Assert.False(harness.Step().Snapshot.ShouldHold);
+        CompleteExpiry(harness);
     }
 
     [Fact]
@@ -123,7 +123,7 @@ public sealed class KernelRestartTests
 
         harness.Clock.Advance(TimeSpan.FromMinutes(2));
         harness.ConfirmAbsent("ssh");
-        Assert.False(harness.Step().Snapshot.ShouldHold);
+        CompleteExpiry(harness);
     }
 
     [Fact]
@@ -193,7 +193,31 @@ public sealed class KernelRestartTests
             Stored("active")
         ]);
 
-        Assert.Equal(["active"], taken);
+        Assert.Equal(["active"], taken.RestoredLeaseIds);
+        Assert.Empty(taken.InvalidRows);
+    }
+
+    [Fact]
+    public void One_invalid_stored_lease_is_reported_without_stopping_the_others_from_restoring()
+    {
+        // Persisted rows are input, not trusted kernel state. In particular, LeaseDeadline.Resume rejects a
+        // zero original duration; that rejection must describe one bad row rather than escape startup and
+        // leave every valid lease unprotected.
+        var harness = new KernelHarness();
+
+        var result = harness.Kernel.Restore(
+        [
+            Stored("bad", original: TimeSpan.Zero),
+            Stored("good")
+        ]);
+
+        Assert.Equal(["good"], result.RestoredLeaseIds);
+        Assert.Contains("bad", Assert.Single(result.InvalidRows), StringComparison.Ordinal);
+
+        harness.ConfirmAbsent("ssh");
+        Assert.Contains(
+            harness.Step().Snapshot.Decision.Inhibitors,
+            inhibitor => inhibitor.Kind == InhibitorKind.CliLease && inhibitor.Detail == "good");
     }
 
     [Fact]
@@ -288,7 +312,7 @@ public sealed class KernelRestartTests
 
         second.Clock.Advance(TimeSpan.FromMinutes(11));
         second.ConfirmAbsent("ssh");
-        Assert.False(second.Step().Snapshot.ShouldHold);
+        CompleteExpiry(second);
     }
 
     [Fact]
@@ -335,6 +359,18 @@ public sealed class KernelRestartTests
         ExpectedSources = ["ssh"],
         CoveredKinds = [InhibitorKind.SshSession, InhibitorKind.CliLease]
     };
+
+    private static void CompleteExpiry(KernelHarness harness)
+    {
+        var pending = harness.Step();
+        Assert.True(pending.Snapshot.ShouldHold);
+        var ending = Assert.Single(pending.Effects, effect =>
+            effect.Kind == EffectKind.PersistLease && effect.Lease?.Status == LeaseStatus.Expired);
+
+        harness.Kernel.Apply(new EffectFinished(new EffectCompletion(ending.EffectId, EffectOutcome.Succeeded)));
+        harness.ConfirmAbsent("ssh");
+        Assert.False(harness.Step().Snapshot.ShouldHold);
+    }
 
     private static LeaseCommandResult Release(KernelHarness harness, CallerSnapshot caller, string requestId)
     {

@@ -21,8 +21,8 @@ public sealed class MigrationRunnerTests
 
         Assert.True(result.IsNewDatabase);
         Assert.Equal(0, result.FromVersion);
-        Assert.Equal(1, result.ToVersion);
-        Assert.Equal([1], result.AppliedVersions);
+        Assert.Equal(2, result.ToVersion);
+        Assert.Equal([1, 2], result.AppliedVersions);
         Assert.Null(result.BackupPath);
 
         using var connection = SqliteTestHelpers.OpenRaw(root.Paths.DatabasePath);
@@ -56,7 +56,7 @@ public sealed class MigrationRunnerTests
         new MigrationRunner(root.Paths, Clock()).Run();
 
         using var connection = SqliteTestHelpers.OpenRaw(root.Paths.DatabasePath);
-        Assert.Equal(1, SqliteTestHelpers.Scalar(connection, "SELECT version FROM schema_versions;"));
+        Assert.Equal(2, SqliteTestHelpers.Scalar(connection, "SELECT MAX(version) FROM schema_versions;"));
         Assert.Equal(
             Timestamps.ToText(Origin),
             SqliteTestHelpers.Text(connection, "SELECT applied_at_utc FROM schema_versions;"));
@@ -71,10 +71,54 @@ public sealed class MigrationRunnerTests
         var second = new MigrationRunner(root.Paths, Clock()).Run();
 
         Assert.False(second.SchemaChanged);
-        Assert.Equal(1, second.FromVersion);
-        Assert.Equal(1, second.ToVersion);
+        Assert.Equal(2, second.FromVersion);
+        Assert.Equal(2, second.ToVersion);
         Assert.Null(second.BackupPath);
         Assert.False(Directory.Exists(root.Paths.BackupsDirectory));
+    }
+
+    [Fact]
+    public void Version_two_adds_owner_sid_to_a_real_version_one_database_without_losing_its_lease()
+    {
+        using var root = new TempRoot();
+        var version1Only = new[] { new Migration(1, "Initial schema", SqliteSchema.Version1) };
+        new MigrationRunner(root.Paths, Clock(), version1Only).Run();
+
+        using (var version1 = SqliteTestHelpers.OpenRaw(root.Paths.DatabasePath))
+        {
+            Assert.Equal(
+                0,
+                SqliteTestHelpers.Scalar(
+                    version1,
+                    "SELECT COUNT(*) FROM pragma_table_info('keep_awake_leases') WHERE name = 'owner_sid';"));
+            SqliteTestHelpers.Execute(version1, """
+                INSERT INTO keep_awake_leases (
+                    id, source, reason, owner_user, started_at_utc, auto_renew, status, epoch_id,
+                    original_duration_seconds, remaining_at_checkpoint_seconds, checkpoint_utc)
+                VALUES (
+                    'lease-v1', 'Cli', 'survive migration', 'liu', '2026-07-31T12:00:00.0000000Z',
+                    0, 'Active', '33333333-3333-3333-3333-333333333333', 10800, 7200,
+                    '2026-07-31T12:00:00.0000000Z');
+                """);
+        }
+
+        var result = new MigrationRunner(root.Paths, Clock()).Run();
+
+        Assert.Equal(1, result.FromVersion);
+        Assert.Equal(2, result.ToVersion);
+        Assert.Equal([2], result.AppliedVersions);
+
+        using var migrated = SqliteTestHelpers.OpenRaw(root.Paths.DatabasePath);
+        Assert.Equal("lease-v1", SqliteTestHelpers.Text(migrated, "SELECT id FROM keep_awake_leases;"));
+        Assert.Equal(
+            1,
+            SqliteTestHelpers.Scalar(
+                migrated,
+                "SELECT COUNT(*) FROM pragma_table_info('keep_awake_leases') WHERE name = 'owner_sid';"));
+
+        using var owner = migrated.CreateCommand();
+        owner.CommandText = "SELECT owner_sid FROM keep_awake_leases WHERE id = 'lease-v1';";
+        Assert.Equal(DBNull.Value, owner.ExecuteScalar());
     }
 
     [Fact]
@@ -83,29 +127,29 @@ public sealed class MigrationRunnerTests
         using var root = new TempRoot();
         new MigrationRunner(root.Paths, Clock()).Run();
 
-        var result = new MigrationRunner(root.Paths, Clock(), WithSecondVersion()).Run();
+        var result = new MigrationRunner(root.Paths, Clock(), WithThirdVersion()).Run();
 
-        Assert.Equal(1, result.FromVersion);
-        Assert.Equal(2, result.ToVersion);
+        Assert.Equal(2, result.FromVersion);
+        Assert.Equal(3, result.ToVersion);
         Assert.NotNull(result.BackupPath);
         Assert.True(File.Exists(result.BackupPath));
-        Assert.Contains("powerlease-v1-", Path.GetFileName(result.BackupPath), StringComparison.Ordinal);
+        Assert.Contains("powerlease-v2-", Path.GetFileName(result.BackupPath), StringComparison.Ordinal);
     }
 
     [Fact]
     public void Two_backups_taken_in_the_same_second_do_not_overwrite_each_other()
     {
         // The copy exists so a failed upgrade can be undone; silently replacing the previous one would
-        // defeat the point. Two attempts at the same upgrade on a stopped clock both copy version 1, so
+        // defeat the point. Two attempts at the same upgrade on a stopped clock both copy version 2, so
         // both want the same file name -- which is the only way to reach the collision at all.
         using var root = new TempRoot();
         var clock = Clock();
         new MigrationRunner(root.Paths, clock).Run();
 
         var first = Assert.Throws<MigrationException>(
-            () => new MigrationRunner(root.Paths, clock, WithBrokenSecondVersion()).Run());
+            () => new MigrationRunner(root.Paths, clock, WithBrokenThirdVersion()).Run());
         var second = Assert.Throws<MigrationException>(
-            () => new MigrationRunner(root.Paths, clock, WithBrokenSecondVersion()).Run());
+            () => new MigrationRunner(root.Paths, clock, WithBrokenThirdVersion()).Run());
 
         Assert.NotEqual(first.BackupPath, second.BackupPath);
         Assert.True(File.Exists(first.BackupPath));
@@ -120,14 +164,14 @@ public sealed class MigrationRunnerTests
         var clock = Clock();
         new MigrationRunner(root.Paths, clock).Run();
 
-        var result = new MigrationRunner(root.Paths, clock, WithThirdVersion()).Run();
+        var result = new MigrationRunner(root.Paths, clock, WithFourthVersion()).Run();
 
-        Assert.Equal([2, 3], result.AppliedVersions);
-        Assert.Equal(3, result.ToVersion);
+        Assert.Equal([3, 4], result.AppliedVersions);
+        Assert.Equal(4, result.ToVersion);
 
         using var connection = SqliteTestHelpers.OpenRaw(root.Paths.DatabasePath);
-        Assert.Contains("second_version", SqliteTestHelpers.TableNames(connection));
         Assert.Contains("third_version", SqliteTestHelpers.TableNames(connection));
+        Assert.Contains("fourth_version", SqliteTestHelpers.TableNames(connection));
     }
 
     [Fact]
@@ -175,16 +219,16 @@ public sealed class MigrationRunnerTests
         }
 
         var error = Assert.Throws<MigrationException>(
-            () => new MigrationRunner(root.Paths, Clock(), WithBrokenSecondVersion()).Run());
+            () => new MigrationRunner(root.Paths, Clock(), WithBrokenThirdVersion()).Run());
 
-        Assert.Equal(2, error.Version);
+        Assert.Equal(3, error.Version);
         Assert.NotNull(error.BackupPath);
         Assert.True(File.Exists(error.BackupPath));
 
         using var connection = SqliteTestHelpers.OpenRaw(root.Paths.DatabasePath);
 
-        // Still at version 1, and the statement that ran before the failing one was rolled back.
-        Assert.Equal(1, SqliteTestHelpers.Scalar(connection, "SELECT MAX(version) FROM schema_versions;"));
+        // Still at version 2, and the statement that ran before the failing one was rolled back.
+        Assert.Equal(2, SqliteTestHelpers.Scalar(connection, "SELECT MAX(version) FROM schema_versions;"));
         Assert.DoesNotContain("half_applied", SqliteTestHelpers.TableNames(connection));
         Assert.Equal(1, SqliteTestHelpers.Scalar(connection, "SELECT COUNT(*) FROM alerts;"));
     }
@@ -205,10 +249,10 @@ public sealed class MigrationRunnerTests
         }
 
         var error = Assert.Throws<MigrationException>(
-            () => new MigrationRunner(root.Paths, Clock(), WithBrokenSecondVersion()).Run());
+            () => new MigrationRunner(root.Paths, Clock(), WithBrokenThirdVersion()).Run());
 
         using var backup = SqliteTestHelpers.OpenRaw(error.BackupPath!);
-        Assert.Equal(1, SqliteTestHelpers.Scalar(backup, "SELECT MAX(version) FROM schema_versions;"));
+        Assert.Equal(2, SqliteTestHelpers.Scalar(backup, "SELECT MAX(version) FROM schema_versions;"));
         Assert.Equal(
             "written before the upgrade",
             SqliteTestHelpers.Text(backup, "SELECT message FROM alerts;"));
@@ -219,7 +263,7 @@ public sealed class MigrationRunnerTests
     {
         // Reading it with the older schema in mind would misinterpret columns rather than fail.
         using var root = new TempRoot();
-        new MigrationRunner(root.Paths, Clock(), WithSecondVersion()).Run();
+        new MigrationRunner(root.Paths, Clock(), WithThirdVersion()).Run();
 
         var error = Assert.Throws<MigrationException>(() => new MigrationRunner(root.Paths, Clock()).Run());
 
@@ -288,27 +332,27 @@ public sealed class MigrationRunnerTests
         Assert.Throws<ArgumentException>(() => new MigrationRunner(root.Paths, Clock(), []));
     }
 
-    private static IReadOnlyList<Migration> WithSecondVersion() =>
-    [
-        .. MigrationRunner.DefaultMigrations,
-        new Migration(2, "Test upgrade", "CREATE TABLE second_version (x INTEGER);")
-    ];
-
     private static IReadOnlyList<Migration> WithThirdVersion() =>
     [
-        .. WithSecondVersion(),
+        .. MigrationRunner.DefaultMigrations,
         new Migration(3, "Test upgrade", "CREATE TABLE third_version (x INTEGER);")
+    ];
+
+    private static IReadOnlyList<Migration> WithFourthVersion() =>
+    [
+        .. WithThirdVersion(),
+        new Migration(4, "Test upgrade", "CREATE TABLE fourth_version (x INTEGER);")
     ];
 
     /// <summary>
     /// A migration whose first statement succeeds and whose second does not, so a rollback has
     /// something visible to undo.
     /// </summary>
-    private static IReadOnlyList<Migration> WithBrokenSecondVersion() =>
+    private static IReadOnlyList<Migration> WithBrokenThirdVersion() =>
     [
         .. MigrationRunner.DefaultMigrations,
         new Migration(
-            2,
+            3,
             "Test failure",
             """
             CREATE TABLE half_applied (x INTEGER);

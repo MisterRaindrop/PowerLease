@@ -308,6 +308,51 @@ public sealed class KernelLeaseCommandTests
         Assert.Equal(TimeSpan.FromMinutes(179), renewal.Lease!.RemainingAtCheckpoint);
     }
 
+    [Theory]
+    [InlineData(EffectOutcome.AlreadyDone)]
+    [InlineData(EffectOutcome.Conflict)]
+    public void A_replayed_or_conflicting_renewal_restores_the_committed_deadline(EffectOutcome outcome)
+    {
+        var harness = new KernelHarness();
+        harness.ConfirmAbsent("ssh");
+        harness.Kernel.Execute(Create(harness, duration: TimeSpan.FromMinutes(10)));
+        var created = Assert.Single(harness.Step().Effects, candidate => candidate.Kind == EffectKind.PersistLease);
+        harness.Kernel.Apply(new EffectFinished(new EffectCompletion(created.EffectId, EffectOutcome.Succeeded)));
+        harness.Step();
+
+        harness.Kernel.Execute(Create(harness, "req-renew", duration: TimeSpan.FromMinutes(30)) with
+        {
+            Kind = LeaseCommandKind.Renew
+        });
+        var renewal = Assert.Single(harness.Step().Effects, candidate => candidate.Kind == EffectKind.PersistLease);
+        harness.Kernel.Apply(new EffectFinished(new EffectCompletion(renewal.EffectId, outcome)));
+        harness.Step();
+
+        // The rejected replay must not restart a ten-minute lease as a fresh thirty-minute hold in memory.
+        harness.Clock.Advance(TimeSpan.FromMinutes(11));
+        harness.ConfirmAbsent("ssh");
+        var ending = Assert.Single(harness.Step().Effects, candidate => candidate.Kind == EffectKind.PersistLease);
+        Assert.Equal(LeaseStatus.Expired, ending.Lease!.Status);
+    }
+
+    [Fact]
+    public void A_renewal_longer_than_the_kernel_maximum_is_rejected()
+    {
+        var harness = new KernelHarness();
+        harness.ConfirmAbsent("ssh");
+        harness.Kernel.Execute(Create(harness));
+        var created = Assert.Single(harness.Step().Effects, candidate => candidate.Kind == EffectKind.PersistLease);
+        harness.Kernel.Apply(new EffectFinished(new EffectCompletion(created.EffectId, EffectOutcome.Succeeded)));
+        harness.Step();
+
+        harness.Kernel.Execute(Create(harness, "req-renew", duration: TimeSpan.MaxValue) with
+        {
+            Kind = LeaseCommandKind.Renew
+        });
+
+        Assert.Equal(LeaseCommandStatus.Rejected, Assert.Single(harness.Step().CompletedCommands).Status);
+    }
+
     [Fact]
     public void A_lease_expires_on_its_own_and_stops_holding()
     {
@@ -322,7 +367,15 @@ public sealed class KernelLeaseCommandTests
 
         harness.Clock.Advance(TimeSpan.FromMinutes(11));
         harness.ConfirmAbsent("ssh");
+        var expiring = harness.Step();
 
+        // Expiry is a reduction in protection, so the expired lease remains an inhibitor until storage has
+        // durably recorded the ending.
+        Assert.True(expiring.Snapshot.ShouldHold);
+        var ending = Assert.Single(expiring.Effects, candidate => candidate.Kind == EffectKind.PersistLease);
+
+        harness.Kernel.Apply(new EffectFinished(new EffectCompletion(ending.EffectId, EffectOutcome.Succeeded)));
+        harness.ConfirmAbsent("ssh");
         Assert.False(harness.Step().Snapshot.ShouldHold);
     }
 
@@ -365,6 +418,30 @@ public sealed class KernelLeaseCommandTests
         harness.Kernel.Execute(Create(harness, duration: TimeSpan.Zero));
 
         Assert.Equal(LeaseCommandStatus.Rejected, Assert.Single(harness.Step().CompletedCommands).Status);
+    }
+
+    [Fact]
+    public void A_lease_longer_than_the_kernel_maximum_is_rejected_without_deadline_arithmetic()
+    {
+        var harness = new KernelHarness();
+        harness.Kernel.Execute(Create(harness, duration: TimeSpan.MaxValue));
+
+        var answer = Assert.Single(harness.Step().CompletedCommands);
+
+        Assert.Equal(LeaseCommandStatus.Rejected, answer.Status);
+        Assert.Contains("30 days", answer.Error!, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Display_expiry_saturates_when_the_wall_clock_is_near_its_maximum()
+    {
+        var harness = new KernelHarness();
+        harness.Clock.UtcNow = DateTimeOffset.MaxValue.AddDays(-1);
+
+        harness.Kernel.Execute(Create(harness, duration: InhibitKernel.MaximumLeaseDuration));
+        var effect = Assert.Single(harness.Step().Effects, candidate => candidate.Kind == EffectKind.PersistLease);
+
+        Assert.Equal(DateTimeOffset.MaxValue, effect.Lease!.ExpiresAtUtc);
     }
 
     [Fact]

@@ -10,8 +10,7 @@ namespace PowerLease.Service;
 internal sealed class LeaseCommandDispatcher
 {
     private readonly KernelLoop _loop;
-    private readonly ConcurrentDictionary<string, TaskCompletionSource<LeaseCommandResult>> _pending =
-        new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, PendingCommand> _pending = new(StringComparer.Ordinal);
 
     public LeaseCommandDispatcher(KernelLoop loop)
     {
@@ -22,27 +21,52 @@ internal sealed class LeaseCommandDispatcher
     public Task<LeaseCommandResult> PostAndWaitAsync(LeaseCommand command, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(command);
-        var completion = new TaskCompletionSource<LeaseCommandResult>(
-            TaskCreationOptions.RunContinuationsAsynchronously);
-        var selected = _pending.GetOrAdd(command.RequestId, completion);
-        if (ReferenceEquals(selected, completion))
+        var pending = new PendingCommand(
+            command.Kind,
+            command.PayloadHash,
+            new TaskCompletionSource<LeaseCommandResult>(TaskCreationOptions.RunContinuationsAsynchronously));
+
+        var selected = _pending.GetOrAdd(command.RequestId, pending);
+
+        if (ReferenceEquals(selected, pending))
         {
             _loop.Post(command);
+        }
+        else if (selected.Kind != command.Kind
+            || !string.Equals(selected.PayloadHash, command.PayloadHash, StringComparison.Ordinal))
+        {
+            // The same identifier carrying a different request. Waiting on the one already in flight would
+            // hand this caller somebody else's answer -- for a release, a success naming a lease it never
+            // asked about. The idempotency record in the database enforces exactly this rule, but only once a
+            // request is durable; while one is still in flight this is the only thing that can.
+            return Task.FromResult(new LeaseCommandResult(
+                command.RequestId,
+                LeaseCommandStatus.Rejected,
+                Error: "That request identifier is already in flight for a different request."));
         }
 
         // Cancelling a connection only stops that connection waiting. The queued command remains registered
         // and is completed durably by a later pump; disconnecting never rolls a lease operation back.
-        return selected.Task.WaitAsync(cancellationToken);
+        return selected.Completion.Task.WaitAsync(cancellationToken);
     }
 
     public void Complete(LeaseCommandResult result)
     {
         ArgumentNullException.ThrowIfNull(result);
-        if (_pending.TryRemove(result.RequestId, out var completion))
+        if (_pending.TryRemove(result.RequestId, out var pending))
         {
-            _ = completion.TrySetResult(result);
+            _ = pending.Completion.TrySetResult(result);
         }
     }
+
+    /// <summary>
+    /// One in-flight request, remembered with enough of its identity to tell a retry of the same command from
+    /// a different command that happens to reuse the identifier.
+    /// </summary>
+    private sealed record PendingCommand(
+        LeaseCommandKind Kind,
+        string PayloadHash,
+        TaskCompletionSource<LeaseCommandResult> Completion);
 }
 
 internal sealed class InhibitKernelWorker : BackgroundService
@@ -145,18 +169,22 @@ internal sealed class LifecycleWorker : IHostedService
 
     private readonly KernelLoop _loop;
     private readonly PowerEventRelay _events;
+    private readonly IClock _clock;
     private readonly ILogger<LifecycleWorker> _logger;
 
     public LifecycleWorker(
         KernelLoop loop,
         PowerEventRelay events,
+        IClock clock,
         ILogger<LifecycleWorker> logger)
     {
         ArgumentNullException.ThrowIfNull(loop);
         ArgumentNullException.ThrowIfNull(events);
+        ArgumentNullException.ThrowIfNull(clock);
         ArgumentNullException.ThrowIfNull(logger);
         _loop = loop;
         _events = events;
+        _clock = clock;
         _logger = logger;
     }
 
@@ -174,10 +202,20 @@ internal sealed class LifecycleWorker : IHostedService
 
     private void OnPowerEvent(object? sender, PowerLeasePowerEventArgs eventArgs)
     {
-        LogPowerEvent(_logger, eventArgs.PowerEvent.ToString(), null);
+        // The clock and the message come first, and logging afterwards. Windows delivers this on its service
+        // control thread, and the file logger writes synchronously -- so logging first would let a slow or full
+        // disk delay the only notification that re-establishes protection after a resume.
         if (eventArgs.PowerEvent == PowerLeasePowerEvent.Resumed)
         {
+            // Before the message, never after. Every elapsed value measured before the machine slept belongs to
+            // an origin that is now meaningless, and the kernel decides a lease's remaining time by comparing
+            // against this epoch. Posting first would let one evaluation run against the old origin -- which,
+            // because the Windows performance counter keeps counting through sleep, reads as though the whole
+            // outage came out of the lease.
+            _clock.BeginNewEpoch();
             _loop.Post(new ResumedFromSleep("Windows reported that the machine resumed"));
         }
+
+        LogPowerEvent(_logger, eventArgs.PowerEvent.ToString(), null);
     }
 }

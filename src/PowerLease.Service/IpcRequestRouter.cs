@@ -12,6 +12,10 @@ namespace PowerLease.Service;
 internal sealed class IpcRequestRouter
 {
     private static readonly TimeSpan CommandQueueTimeout = TimeSpan.FromSeconds(30);
+
+    // A week covers plausible interactive work and matches the longest configured SSH hold, without allowing a
+    // malformed request to overflow deadline arithmetic deeper in the kernel.
+    private static readonly TimeSpan MaximumLeaseDuration = TimeSpan.FromDays(7);
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web)
     {
         PropertyNameCaseInsensitive = true
@@ -117,6 +121,13 @@ internal sealed class IpcRequestRouter
             return ResponseEnvelope.Refused(request.RequestId, error!);
         }
 
+        if (kind == LeaseCommandKind.Release
+            && leaseId is null
+            && !TryResolveOwnLease(caller, out leaseId, out error))
+        {
+            return ResponseEnvelope.Refused(request.RequestId, error!);
+        }
+
         var now = _clock.Now;
         var command = new LeaseCommand
         {
@@ -163,6 +174,12 @@ internal sealed class IpcRequestRouter
                             return false;
                         }
 
+                        if (payload.Duration > MaximumLeaseDuration)
+                        {
+                            error = "CreateLease duration cannot exceed 7 days.";
+                            return false;
+                        }
+
                         leaseId = $"cli:{request.RequestId:N}";
                         duration = payload.Duration;
                         reason = payload.Reason;
@@ -178,6 +195,12 @@ internal sealed class IpcRequestRouter
                             return false;
                         }
 
+                        if (payload.Duration > MaximumLeaseDuration)
+                        {
+                            error = "RenewLease duration cannot exceed 7 days.";
+                            return false;
+                        }
+
                         leaseId = payload.LeaseId;
                         duration = payload.Duration;
                         return true;
@@ -186,13 +209,13 @@ internal sealed class IpcRequestRouter
                 case LeaseCommandKind.Release:
                     {
                         var payload = JsonSerializer.Deserialize<ReleaseLeasePayload>(request.PayloadJson ?? "{}", Json);
-                        if (payload is null || string.IsNullOrWhiteSpace(payload.LeaseId))
+                        if (payload is null)
                         {
-                            error = "ReleaseLease requires a leaseId.";
+                            error = "ReleaseLease requires a request payload.";
                             return false;
                         }
 
-                        leaseId = payload.LeaseId;
+                        leaseId = string.IsNullOrWhiteSpace(payload.LeaseId) ? null : payload.LeaseId;
                         return true;
                     }
 
@@ -206,6 +229,40 @@ internal sealed class IpcRequestRouter
             error = $"The request payload is not valid JSON: {exception.Message}";
             return false;
         }
+    }
+
+    private bool TryResolveOwnLease(CallerSnapshot caller, out string? leaseId, out string? error)
+    {
+        leaseId = null;
+        error = null;
+        var loaded = _leases();
+        if (loaded.HasUnreadableRows)
+        {
+            error = "Stored holds could not all be read; specify the hold identifier to release.";
+            return false;
+        }
+
+        var owned = loaded.Leases
+            .Where(lease => lease.Status == LeaseStatus.Active
+                && lease.OwnerSid is { Length: > 0 } ownerSid
+                && string.Equals(ownerSid, caller.Sid, StringComparison.Ordinal))
+            .Select(lease => lease.Id)
+            .ToArray();
+
+        if (owned.Length == 0)
+        {
+            error = "The caller has no active holds to release.";
+            return false;
+        }
+
+        if (owned.Length > 1)
+        {
+            error = "The caller has more than one active hold; specify the hold identifier to release.";
+            return false;
+        }
+
+        leaseId = owned[0];
+        return true;
     }
 
     private static StatusResponse MapStatus(KernelSnapshot snapshot) => new()
@@ -285,9 +342,4 @@ internal sealed class IpcRequestRouter
         }
     }
 
-    private sealed record CreateLeasePayload(TimeSpan Duration, string? Reason);
-
-    private sealed record RenewLeasePayload(string? LeaseId, TimeSpan Duration);
-
-    private sealed record ReleaseLeasePayload(string? LeaseId);
 }

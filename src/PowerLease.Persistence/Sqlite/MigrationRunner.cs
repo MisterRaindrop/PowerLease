@@ -42,7 +42,10 @@ public sealed class MigrationRunner
     }
 
     public static IReadOnlyList<Migration> DefaultMigrations { get; } =
-        [new Migration(1, "Initial schema", SqliteSchema.Version1)];
+    [
+        new Migration(1, "Initial schema", SqliteSchema.Version1),
+        new Migration(2, "Persist lease owner security identifiers", SqliteSchema.Version2)
+    ];
 
     public int TargetVersion => Migrations[^1].Version;
 

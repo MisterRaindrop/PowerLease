@@ -51,6 +51,7 @@ public sealed class ProgramTests
         Assert.Equal(ExitCode.Success, code);
         Assert.Contains("status", output, StringComparison.Ordinal);
         Assert.Contains("hold <duration>", output, StringComparison.Ordinal);
+        Assert.Contains("maximum 7 days", output, StringComparison.Ordinal);
         Assert.Contains("Exit codes", output, StringComparison.Ordinal);
 
         // The one thing a user has to understand about this tool.
@@ -90,6 +91,18 @@ public sealed class ProgramTests
         var client = new FakeClient();
 
         var (code, output) = Run(client, "hold", "soon");
+
+        Assert.Equal(ExitCode.UsageError, code);
+        Assert.Contains("is not a duration", output, StringComparison.Ordinal);
+        Assert.Null(client.RequestedDuration);
+    }
+
+    [Fact]
+    public void An_overflowing_duration_is_a_usage_error_instead_of_a_crash()
+    {
+        var client = new FakeClient();
+
+        var (code, output) = Run(client, "hold", "1e308h");
 
         Assert.Equal(ExitCode.UsageError, code);
         Assert.Contains("is not a duration", output, StringComparison.Ordinal);

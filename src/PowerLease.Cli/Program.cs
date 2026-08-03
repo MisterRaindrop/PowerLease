@@ -4,7 +4,8 @@ namespace PowerLease.Cli;
 
 public static class Program
 {
-    public static Task<int> Main(string[] args) => RunAsync(args, client: null, Console.Out, CancellationToken.None);
+    public static Task<int> Main(string[] args) =>
+        RunAsync(args, new PowerLeaseClient(), Console.Out, CancellationToken.None);
 
     /// <summary>
     /// Parse the arguments and run the command.
@@ -109,7 +110,7 @@ public static class Program
         output.WriteLine();
         output.WriteLine("  status                 what is keeping this machine awake, and what is not watched");
         output.WriteLine("  list                   the holds currently in place");
-        output.WriteLine("  hold <duration> [why]  keep this machine awake, for example: hold 3h building");
+        output.WriteLine("  hold <duration> [why]  keep this machine awake (maximum 7 days), e.g. hold 3h building");
         output.WriteLine("  release [id]           end a hold you created");
         output.WriteLine("  wake-status            what this machine's power configuration allows");
         output.WriteLine();

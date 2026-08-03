@@ -52,13 +52,13 @@ public static class Program
             var power = new PowerRequestManager();
             var timeZones = new SystemTimeZoneProvider();
             var kernel = new InhibitKernel(options, new PowerInhibitCoordinator(power), clock);
-            _ = kernel.Restore(loaded.Leases);
+            var restored = kernel.Restore(loaded.Leases);
             var loop = new KernelLoop(
                 kernel,
                 new SynchronizedEffectExecutor(new SqliteEffectExecutor(store, clock), store),
                 timeZones);
 
-            PostStartupMessages(loop, configLoad, loaded);
+            PostStartupMessages(loop, configLoad, loaded, restored);
 
             using var host = CreateHost(
                 args,
@@ -159,7 +159,8 @@ public static class Program
     private static void PostStartupMessages(
         KernelLoop loop,
         ConfigLoadResult configLoad,
-        LeaseLoadResult loaded)
+        LeaseLoadResult loaded,
+        LeaseRestoreResult restored)
     {
         loop.Post(new ServiceStarted("the Windows service started"));
 
@@ -177,6 +178,17 @@ public static class Program
                 "leases-unreadable",
                 FaultSeverity.Persistent,
                 "Stored leases could not be read: " + string.Join("; ", loaded.UnreadableRows)));
+        }
+
+        if (restored.HasInvalidRows)
+        {
+            // A row the kernel refused is a hold somebody was promised and is no longer getting. The fault
+            // replaces the inhibitor it could not restore, so the machine keeps holding and `powerlease status`
+            // says why, instead of the lease disappearing in silence.
+            loop.Post(new FaultObserved(
+                "leases-invalid",
+                FaultSeverity.Persistent,
+                "Stored leases could not be restored: " + string.Join("; ", restored.InvalidRows)));
         }
     }
 

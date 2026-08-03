@@ -295,15 +295,25 @@ public static class Commands
 
         if (char.IsAsciiLetter(suffix)
             && double.TryParse(number, NumberStyles.Float, CultureInfo.InvariantCulture, out var value)
+            && double.IsFinite(value)
             && value > 0)
         {
-            duration = char.ToLowerInvariant(suffix) switch
+            try
             {
-                'h' => TimeSpan.FromHours(value),
-                'm' => TimeSpan.FromMinutes(value),
-                's' => TimeSpan.FromSeconds(value),
-                _ => TimeSpan.Zero
-            };
+                duration = char.ToLowerInvariant(suffix) switch
+                {
+                    'h' => TimeSpan.FromHours(value),
+                    'm' => TimeSpan.FromMinutes(value),
+                    's' => TimeSpan.FromSeconds(value),
+                    _ => TimeSpan.Zero
+                };
+            }
+            catch (OverflowException)
+            {
+                // A syntactically valid number can still be too large for TimeSpan. It is a usage error, not a
+                // reason for the CLI to terminate with a stack trace.
+                return false;
+            }
 
             return duration > TimeSpan.Zero;
         }
