@@ -58,7 +58,20 @@ public static class IpcMethods
         [GetLogs] = IpcAccessLevel.Administrator
     };
 
-    /// <summary>Every method the service answers.</summary>
+    /// <summary>
+    /// Every method name this protocol defines, with the access each one requires.
+    /// <para>
+    /// Not the same as the set a given build answers. A name appearing here means the permission for it is
+    /// decided; whether a handler exists is the host's business, and one that does not is refused by name like
+    /// any other request it cannot serve. The permissions are declared ahead of the handlers on purpose --
+    /// adding a handler later must not also be the moment somebody decides who may call it.
+    /// </para>
+    /// <para>
+    /// In this version <see cref="GetRules" />, <see cref="UpdateRules" />, <see cref="GetSchedules" />,
+    /// <see cref="UpdateSchedules" />, <see cref="GetHistory" /> and <see cref="GetLogs" /> have no payload
+    /// type and no handler. Configuration is edited as a file, and history is read from the database.
+    /// </para>
+    /// </summary>
     public static IReadOnlyCollection<string> All => Required.Keys;
 
     /// <summary>
