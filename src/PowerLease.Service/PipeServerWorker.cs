@@ -13,6 +13,7 @@ namespace PowerLease.Service;
 internal sealed class PipeServerWorker : BackgroundService
 {
     private const int MaximumServerInstances = 16;
+    private static readonly TimeSpan ConnectionDeadline = TimeSpan.FromSeconds(5);
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web)
     {
         PropertyNameCaseInsensitive = true
@@ -78,12 +79,16 @@ internal sealed class PipeServerWorker : BackgroundService
         CancellationToken cancellationToken)
     {
         using (pipe)
+        using (var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
         {
+            // The deadline starts before impersonation, so an authenticated client cannot occupy an instance by
+            // connecting and then withholding its frame. Disposal below tears down every expired connection.
+            deadline.CancelAfter(ConnectionDeadline);
             try
             {
-                await HandleConnectionAsync(pipe, cancellationToken).ConfigureAwait(false);
+                await HandleConnectionAsync(pipe, deadline.Token).ConfigureAwait(false);
             }
-            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            catch (OperationCanceledException) when (deadline.IsCancellationRequested)
             {
             }
 #pragma warning disable CA1031 // One malformed or disconnected client must not affect other pipe instances.
@@ -97,7 +102,9 @@ internal sealed class PipeServerWorker : BackgroundService
 
     private async Task HandleConnectionAsync(NamedPipeServerStream pipe, CancellationToken cancellationToken)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         var caller = CaptureCaller(pipe);
+        cancellationToken.ThrowIfCancellationRequested();
         var request = await ReadRequestAsync(pipe, cancellationToken).ConfigureAwait(false);
         var response = request is null
             ? ResponseEnvelope.Refused(Guid.Empty, "The request frame was invalid or too large.")
@@ -144,8 +151,6 @@ internal sealed class PipeServerWorker : BackgroundService
             using var identity = WindowsIdentity.GetCurrent(TokenAccessLevels.Query);
             var sid = identity.User?.Value
                 ?? throw new UnauthorizedAccessException("The pipe caller has no security identifier.");
-            var administrator = identity.Groups?.Any(group =>
-                string.Equals(group.Value, AdministratorsSid.Value, StringComparison.Ordinal)) == true;
             var elevated = new WindowsPrincipal(identity).IsInRole(WindowsBuiltInRole.Administrator);
 
             // Only plain values leave this callback. The impersonation token and WindowsIdentity are disposed
@@ -155,7 +160,9 @@ internal sealed class PipeServerWorker : BackgroundService
                 Sid = sid,
                 AccountName = identity.Name,
                 IsElevated = elevated,
-                IsAdministrator = administrator
+                // IsInRole performs an access check against enabled token groups. Reading identity.Groups here
+                // would count the Administrators SID even when UAC has made it deny-only.
+                IsAdministrator = elevated
             };
         });
 

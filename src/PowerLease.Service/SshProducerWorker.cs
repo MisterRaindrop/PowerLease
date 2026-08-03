@@ -14,6 +14,7 @@ namespace PowerLease.Service;
 internal sealed class SshProducerWorker : SourceProducerWorker
 {
     private const string BookmarkChannel = "OpenSSH/Operational";
+    private const string BookmarkFaultKey = "ssh-event-log-bookmark";
     private const string LocalSystemSid = "S-1-5-18";
     private static readonly TimeSpan Interval = TimeSpan.FromSeconds(5);
     private static readonly TimeSpan CommandTimeout = TimeSpan.FromSeconds(30);
@@ -34,6 +35,7 @@ internal sealed class SshProducerWorker : SourceProducerWorker
     private readonly StoreGate _storeGate;
     private readonly HashSet<string> _satisfied;
     private string? _bookmark;
+    private bool _repairBookmarkFaultAfterHealthyRead;
 
     public SshProducerWorker(
         PowerLeaseConfig config,
@@ -81,6 +83,15 @@ internal sealed class SshProducerWorker : SourceProducerWorker
         var log = _events?.Read(_bookmark) ?? SshLogRead.Unavailable(
             SshLogChannelState.NotInstalled,
             "OpenSSH Event Log reading is disabled by configuration.");
+        var recoveredDiscontinuity = _events?.LastReadDiscontinuityDetail;
+        if (recoveredDiscontinuity is not null)
+        {
+            // A persistent fault is an unconditional inhibitor. It stays latched through the re-seed turn and is
+            // repaired only after a later continuous read proves the replacement position is usable.
+            Loop.Post(new FaultObserved(BookmarkFaultKey, FaultSeverity.Persistent, recoveredDiscontinuity));
+            _repairBookmarkFaultAfterHealthyRead = false;
+        }
+
         var result = _correlator.Evaluate(_tcp.GetEstablishedConnections(), log, now, Clock.UtcNow);
 
         var awaiting = new List<(string Key, Task<LeaseCommandResult> Completion)>();
@@ -122,6 +133,16 @@ internal sealed class SshProducerWorker : SourceProducerWorker
                 transaction.SetBookmark(BookmarkChannel, bookmark, Clock.UtcNow);
                 transaction.Commit();
                 _bookmark = bookmark;
+            }
+
+            if (recoveredDiscontinuity is not null)
+            {
+                _repairBookmarkFaultAfterHealthyRead = true;
+            }
+            else if (_repairBookmarkFaultAfterHealthyRead)
+            {
+                Loop.Post(new FaultRepaired(BookmarkFaultKey));
+                _repairBookmarkFaultAfterHealthyRead = false;
             }
         }
 

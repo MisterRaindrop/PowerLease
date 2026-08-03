@@ -1,4 +1,4 @@
-using System.Reflection;
+using System.Runtime.InteropServices;
 using PowerLease.Application.Inhibitors;
 using PowerLease.Application.Kernel;
 using PowerLease.Infrastructure.Windows.Power;
@@ -14,21 +14,30 @@ namespace PowerLease.IntegrationTests;
 public sealed class WindowsAdapterTests
 {
     [Fact]
-    public void The_request_type_asked_for_is_the_one_that_keeps_the_machine_awake()
+    public void Acquire_asks_Windows_for_system_required_and_never_display_required()
     {
         // POWER_REQUEST_TYPE does not start where one would guess: zero is PowerRequestDisplayRequired, and
         // PowerRequestSystemRequired is one. Getting it wrong is close to invisible -- a display request keeps
         // the system awake as a side effect, so the machine would still stay up while the product held the
         // wrong thing, lit the screen of a headless machine, and appeared under the wrong heading in
         // powercfg /requests. Nothing but this test would notice.
-        var requestType = typeof(PowerRequestManager)
-            .GetNestedType("PowerRequestType", BindingFlags.NonPublic);
+        var native = new RecordingPowerRequestNativeMethods();
+        var manager = new PowerRequestManager(native);
 
-        Assert.NotNull(requestType);
-        Assert.Equal(0, (int)Enum.Parse(requestType, "DisplayRequired"));
-        Assert.Equal(1, (int)Enum.Parse(requestType, "SystemRequired"));
-        Assert.Equal(2, (int)Enum.Parse(requestType, "AwayModeRequired"));
-        Assert.Equal(3, (int)Enum.Parse(requestType, "ExecutionRequired"));
+        try
+        {
+            Assert.Equal(PowerInhibitResult.Held, manager.Acquire(generation: 1));
+        }
+        finally
+        {
+            manager.Close(generation: 1);
+        }
+
+        var set = Assert.Single(native.SetRequests);
+        Assert.Equal(PowerRequestType.SystemRequired, set.RequestType);
+        Assert.DoesNotContain(
+            native.SetRequests,
+            request => request.RequestType == PowerRequestType.DisplayRequired);
     }
 
     [Fact]
@@ -36,30 +45,41 @@ public sealed class WindowsAdapterTests
     {
         // The coordinator closes a generation whose acquisition outcome it could not establish, so this is a
         // path taken in ordinary operation rather than an edge case.
-        var manager = new PowerRequestManager();
+        var native = new RecordingPowerRequestNativeMethods();
+        var manager = new PowerRequestManager(native);
 
         manager.Close(generation: 42);
         manager.Close(generation: 42);
+
+        Assert.Empty(native.ClearRequests);
+        Assert.Empty(native.Handles);
     }
 
     [Fact]
-    public void Holding_the_machine_awake_and_letting_go_again_reports_what_happened()
+    public void Each_generation_creates_sets_clears_and_closes_exactly_one_handle()
     {
-        // Runs for real on the CI runner: it only ever prevents sleep, so it cannot put the runner to sleep.
-        var manager = new PowerRequestManager();
+        var native = new RecordingPowerRequestNativeMethods();
+        var manager = new PowerRequestManager(native);
 
-        var first = manager.Acquire(generation: 1);
-        Assert.True(
-            first is PowerInhibitResult.Held or PowerInhibitResult.Rejected or PowerInhibitResult.Uncertain,
-            $"unexpected result {first}");
+        try
+        {
+            Assert.Equal(PowerInhibitResult.Held, manager.Acquire(generation: 1));
+            Assert.Equal(PowerInhibitResult.Held, manager.Acquire(generation: 2));
+        }
+        finally
+        {
+            manager.Close(generation: 1);
+            manager.Close(generation: 2);
+        }
 
-        // Whatever happened, letting go must be safe and must not throw.
         manager.Close(generation: 1);
-
-        // And a fresh generation can be taken out afterwards.
-        var second = manager.Acquire(generation: 2);
         manager.Close(generation: 2);
-        Assert.True(second is PowerInhibitResult.Held or PowerInhibitResult.Rejected or PowerInhibitResult.Uncertain);
+
+        Assert.Equal(2, native.Handles.Count);
+        Assert.Equal(2, native.SetRequests.Count);
+        Assert.Equal(2, native.ClearRequests.Count);
+        Assert.All(native.ClearRequests, request => Assert.Equal(PowerRequestType.SystemRequired, request.RequestType));
+        Assert.All(native.Handles, handle => Assert.Equal(1, handle.CloseCount));
     }
 
     [Fact]
@@ -67,24 +87,21 @@ public sealed class WindowsAdapterTests
     {
         // "The power plan forbids this" and "nobody could find out" call for different actions from the user,
         // so a fact that could not be determined must stay null and say which call failed.
-        // Declared concretely because the analyser insists; the interface exists for the host to inject and
-        // for a fake to stand in, which is production's concern rather than this test's.
-        var probe = new PowerCapabilityProbe();
+        var native = new UnavailablePowerCapabilityNativeMethods();
+        var probe = new PowerCapabilityProbe(native);
 
         var snapshot = probe.Read();
 
-        var facts = new[]
-        {
-            snapshot.SystemRequiredHonouredOnMains,
-            snapshot.SystemRequiredHonouredOnBattery,
-            snapshot.ModernStandby,
-            snapshot.RunningOnBattery
-        };
-
-        // Every fact is either known or listed as unavailable; a null with nothing said about it would reach the
-        // user as a blank that reads like a no.
-        Assert.Equal(facts.Any(fact => fact is null), snapshot.Unavailable.Count > 0);
-        Assert.All(snapshot.Unavailable, detail => Assert.False(string.IsNullOrWhiteSpace(detail)));
+        Assert.Null(snapshot.SystemRequiredHonouredOnMains);
+        Assert.Null(snapshot.SystemRequiredHonouredOnBattery);
+        Assert.Null(snapshot.ModernStandby);
+        Assert.Null(snapshot.RunningOnBattery);
+        Assert.Equal(4, snapshot.Unavailable.Count);
+        Assert.Single(snapshot.Unavailable, detail => detail.Contains("PowerReadACValue", StringComparison.Ordinal));
+        Assert.Single(snapshot.Unavailable, detail => detail.Contains("PowerReadDCValue", StringComparison.Ordinal));
+        Assert.Single(snapshot.Unavailable, detail => detail.Contains("GetPwrCapabilities", StringComparison.Ordinal));
+        Assert.Single(snapshot.Unavailable, detail => detail.Contains("GetSystemPowerStatus", StringComparison.Ordinal));
+        Assert.Equal(1, native.LocalFreeCalls);
     }
 
     [Fact]
@@ -183,5 +200,118 @@ public sealed class WindowsAdapterTests
             Assert.Null(read.Bookmark);
             Assert.False(string.IsNullOrWhiteSpace(read.Detail));
         }
+    }
+
+    private sealed class RecordingPowerRequestNativeMethods : IPowerRequestNativeMethods
+    {
+        public List<FakePowerRequestHandle> Handles { get; } = [];
+
+        public List<(SafeHandle Handle, PowerRequestType RequestType)> SetRequests { get; } = [];
+
+        public List<(SafeHandle Handle, PowerRequestType RequestType)> ClearRequests { get; } = [];
+
+        public SafeHandle PowerCreateRequest(string reason)
+        {
+            Assert.False(string.IsNullOrWhiteSpace(reason));
+            var handle = new FakePowerRequestHandle(Handles.Count + 1);
+            Handles.Add(handle);
+            return handle;
+        }
+
+        public bool PowerSetRequest(SafeHandle powerRequest, PowerRequestType requestType)
+        {
+            SetRequests.Add((powerRequest, requestType));
+            return true;
+        }
+
+        public bool PowerClearRequest(SafeHandle powerRequest, PowerRequestType requestType)
+        {
+            ClearRequests.Add((powerRequest, requestType));
+            return true;
+        }
+
+        public int GetLastError() => 0;
+    }
+
+    private sealed class FakePowerRequestHandle : SafeHandle
+    {
+        public FakePowerRequestHandle(int value)
+            : base(IntPtr.Zero, ownsHandle: true)
+        {
+            SetHandle(new IntPtr(value));
+        }
+
+        public int CloseCount { get; private set; }
+
+        public override bool IsInvalid => handle == IntPtr.Zero;
+
+        protected override bool ReleaseHandle()
+        {
+            CloseCount++;
+            return true;
+        }
+    }
+
+    private sealed class UnavailablePowerCapabilityNativeMethods : IPowerCapabilityNativeMethods
+    {
+        private readonly Guid _scheme = new("c7f63920-4fc2-49a2-a509-0678fc9f5c8c");
+
+        public int LocalFreeCalls { get; private set; }
+
+        public uint PowerGetActiveScheme(IntPtr userRootPowerKey, out IntPtr activePolicyGuid)
+        {
+            activePolicyGuid = Marshal.AllocHGlobal(Marshal.SizeOf<Guid>());
+            Marshal.StructureToPtr(_scheme, activePolicyGuid, fDeleteOld: false);
+            return 0;
+        }
+
+        public uint PowerReadACValue(
+            IntPtr rootPowerKey,
+            ref Guid schemeGuid,
+            ref Guid subgroupGuid,
+            ref Guid powerSettingGuid,
+            out uint type,
+            out uint buffer,
+            ref uint bufferSize)
+        {
+            type = 0;
+            buffer = 0;
+            return 5;
+        }
+
+        public uint PowerReadDCValue(
+            IntPtr rootPowerKey,
+            ref Guid schemeGuid,
+            ref Guid subgroupGuid,
+            ref Guid powerSettingGuid,
+            out uint type,
+            out uint buffer,
+            ref uint bufferSize)
+        {
+            type = 0;
+            buffer = 0;
+            return 50;
+        }
+
+        public bool GetPwrCapabilities(out SystemPowerCapabilities capabilities)
+        {
+            capabilities = default;
+            return false;
+        }
+
+        public bool GetSystemPowerStatus(out SystemPowerStatus systemPowerStatus)
+        {
+            systemPowerStatus = default;
+            return false;
+        }
+
+        public IntPtr LocalFree(IntPtr memory)
+        {
+            Marshal.FreeHGlobal(memory);
+            LocalFreeCalls++;
+            return IntPtr.Zero;
+        }
+
+        public int GetLastError() => 31;
     }
 }
