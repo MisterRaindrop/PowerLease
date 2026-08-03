@@ -74,7 +74,7 @@ public sealed partial class OpenSshEventProvider : ISshAuthLogReader
         }
     }
 
-    private SshLogRead ReadAttempt(string? bookmarkXml, string? incarnation, bool hasStoredBookmark)
+    private static SshLogRead ReadAttempt(string? bookmarkXml, string? incarnation, bool hasStoredBookmark)
     {
         try
         {

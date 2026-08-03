@@ -243,6 +243,19 @@ public sealed class ServiceHostTests
 
         public DateTimeOffset UtcNow { get; } = new(2026, 8, 3, 0, 0, 0, TimeSpan.Zero);
 
-        public MonotonicStamp Now { get; } = new(Epoch, TimeSpan.FromMinutes(1));
+        public MonotonicStamp Now { get; private set; } = new(Epoch, TimeSpan.FromMinutes(1));
+
+        public int NewEpochs { get; private set; }
+
+        /// <summary>
+        /// Counted as well as applied, so a test can show the host really does start a new epoch on resume --
+        /// the call the whole resume mechanism depends on, and the one that had no caller at all until it was
+        /// wired up.
+        /// </summary>
+        public void BeginNewEpoch()
+        {
+            NewEpochs++;
+            Now = new MonotonicStamp(Guid.NewGuid(), TimeSpan.Zero);
+        }
     }
 }
