@@ -42,6 +42,13 @@ Early. This is `v0.x`, which means:
   the build provenance attestation attached to each release.
 - Releases are marked as prereleases.
 
+### v0.1.0 real-hardware release gate
+
+`v0.1.0` is not complete until all seven scenarios in the
+[real-machine runbook](tests/PowerLease.IntegrationTests/RealMachine.md) have passed on physical
+Windows hardware. CI deliberately excludes these tests: only a real machine can demonstrate that a
+SYSTEM request prevents idle sleep and that, after release, Windows sleeps by itself.
+
 ## Install
 
 Download `PowerLease-Setup-X.Y.Z-x64.exe` from the
