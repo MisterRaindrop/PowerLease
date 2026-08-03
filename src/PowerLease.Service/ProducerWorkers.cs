@@ -2,6 +2,7 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using PowerLease.Application.Hosting;
 using PowerLease.Application.Inhibitors;
+using PowerLease.Application.Kernel;
 using PowerLease.Domain;
 using PowerLease.Infrastructure.Windows.Sources;
 using PowerLease.Persistence;
