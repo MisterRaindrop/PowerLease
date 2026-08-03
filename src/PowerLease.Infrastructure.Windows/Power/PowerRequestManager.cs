@@ -4,32 +4,54 @@ using PowerLease.Application.Kernel;
 
 namespace PowerLease.Infrastructure.Windows.Power;
 
+internal enum PowerRequestType
+{
+    DisplayRequired = 0,
+    SystemRequired = 1,
+    AwayModeRequired = 2,
+    ExecutionRequired = 3
+}
+
+internal interface IPowerRequestNativeMethods
+{
+    SafeHandle PowerCreateRequest(string reason);
+
+    bool PowerSetRequest(SafeHandle powerRequest, PowerRequestType requestType);
+
+    bool PowerClearRequest(SafeHandle powerRequest, PowerRequestType requestType);
+
+    int GetLastError();
+}
+
 /// <summary>Owns one Windows power-request handle for each kernel generation.</summary>
 public sealed class PowerRequestManager : IPowerInhibitor
 {
-    private const uint PowerRequestContextVersion = 0;
-    private const uint PowerRequestContextSimpleString = 0x00000001;
     private const int ErrorAccessDenied = 5;
     private const int ErrorNotSupported = 50;
     private const int ErrorAccessDisabledByPolicy = 1260;
 
     private readonly object _sync = new();
-    private readonly Dictionary<long, SafePowerRequestHandle> _requests = [];
+    private readonly Dictionary<long, SafeHandle> _requests = [];
+    private readonly IPowerRequestNativeMethods _native;
+
+    public PowerRequestManager()
+        : this(new WindowsPowerRequestNativeMethods())
+    {
+    }
+
+    internal PowerRequestManager(IPowerRequestNativeMethods native)
+    {
+        ArgumentNullException.ThrowIfNull(native);
+        _native = native;
+    }
 
     public PowerInhibitResult Acquire(long generation)
     {
-        SafePowerRequestHandle request;
+        SafeHandle request;
 
         try
         {
-            var context = new ReasonContext
-            {
-                Version = PowerRequestContextVersion,
-                Flags = PowerRequestContextSimpleString,
-                SimpleReasonString = "PowerLease is holding this machine awake."
-            };
-
-            request = NativeMethods.PowerCreateRequest(ref context);
+            request = _native.PowerCreateRequest("PowerLease is holding this machine awake.");
         }
         catch (DllNotFoundException)
         {
@@ -42,7 +64,7 @@ public sealed class PowerRequestManager : IPowerInhibitor
 
         if (request.IsInvalid)
         {
-            var error = Marshal.GetLastPInvokeError();
+            var error = _native.GetLastError();
             request.Dispose();
             return ClassifyFailure(error);
         }
@@ -50,7 +72,7 @@ public sealed class PowerRequestManager : IPowerInhibitor
         bool wasSet;
         try
         {
-            wasSet = NativeMethods.PowerSetRequest(request, PowerRequestType.SystemRequired);
+            wasSet = _native.PowerSetRequest(request, PowerRequestType.SystemRequired);
         }
         catch (DllNotFoundException)
         {
@@ -65,12 +87,12 @@ public sealed class PowerRequestManager : IPowerInhibitor
 
         if (!wasSet)
         {
-            var error = Marshal.GetLastPInvokeError();
+            var error = _native.GetLastError();
             request.Dispose();
             return ClassifyFailure(error);
         }
 
-        SafePowerRequestHandle? previous = null;
+        SafeHandle? previous = null;
         try
         {
             lock (_sync)
@@ -97,7 +119,7 @@ public sealed class PowerRequestManager : IPowerInhibitor
 
     public void Close(long generation)
     {
-        SafePowerRequestHandle? request;
+        SafeHandle? request;
         lock (_sync)
         {
             _requests.Remove(generation, out request);
@@ -113,7 +135,7 @@ public sealed class PowerRequestManager : IPowerInhibitor
             : PowerInhibitResult.Uncertain;
     }
 
-    private static void ReleaseNoThrow(SafePowerRequestHandle? request)
+    private void ReleaseNoThrow(SafeHandle? request)
     {
         if (request is null || request.IsClosed)
         {
@@ -124,7 +146,7 @@ public sealed class PowerRequestManager : IPowerInhibitor
         {
             if (!request.IsInvalid)
             {
-                _ = NativeMethods.PowerClearRequest(request, PowerRequestType.SystemRequired);
+                _ = _native.PowerClearRequest(request, PowerRequestType.SystemRequired);
             }
         }
 #pragma warning disable CA1031 // Closing the handle is the authoritative cleanup even if clearing fails.
@@ -138,6 +160,36 @@ public sealed class PowerRequestManager : IPowerInhibitor
             request.Dispose();
         }
     }
+}
+
+internal sealed class WindowsPowerRequestNativeMethods : IPowerRequestNativeMethods
+{
+    private const uint PowerRequestContextVersion = 0;
+    private const uint PowerRequestContextSimpleString = 0x00000001;
+
+    public SafeHandle PowerCreateRequest(string reason)
+    {
+        var context = new ReasonContext
+        {
+            Version = PowerRequestContextVersion,
+            Flags = PowerRequestContextSimpleString,
+            SimpleReasonString = reason
+        };
+
+        return NativeMethods.PowerCreateRequest(ref context);
+    }
+
+    public bool PowerSetRequest(SafeHandle powerRequest, PowerRequestType requestType) =>
+        NativeMethods.PowerSetRequest(AsNativeHandle(powerRequest), requestType);
+
+    public bool PowerClearRequest(SafeHandle powerRequest, PowerRequestType requestType) =>
+        NativeMethods.PowerClearRequest(AsNativeHandle(powerRequest), requestType);
+
+    public int GetLastError() => Marshal.GetLastPInvokeError();
+
+    private static SafePowerRequestHandle AsNativeHandle(SafeHandle handle) =>
+        handle as SafePowerRequestHandle
+        ?? throw new ArgumentException("The power request handle was not created by the Windows adapter.", nameof(handle));
 
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
     private struct ReasonContext
@@ -149,20 +201,6 @@ public sealed class PowerRequestManager : IPowerInhibitor
         public string SimpleReasonString;
     }
 
-    /// <summary>
-    /// POWER_REQUEST_TYPE. The values matter and are not in the order one would guess: display comes first, so
-    /// zero is a request to keep the SCREEN on, not the machine. Getting this wrong is invisible -- a display
-    /// request keeps the system awake as a side effect, so a machine would still stay up and the mistake would
-    /// only show as the wrong category in powercfg /requests and a lit screen on a headless machine.
-    /// </summary>
-    private enum PowerRequestType
-    {
-        DisplayRequired = 0,
-        SystemRequired = 1,
-        AwayModeRequired = 2,
-        ExecutionRequired = 3
-    }
-
     private sealed class SafePowerRequestHandle : SafeHandleZeroOrMinusOneIsInvalid
     {
         private SafePowerRequestHandle()
@@ -170,10 +208,7 @@ public sealed class PowerRequestManager : IPowerInhibitor
         {
         }
 
-        protected override bool ReleaseHandle()
-        {
-            return NativeMethods.CloseHandle(handle);
-        }
+        protected override bool ReleaseHandle() => NativeMethods.CloseHandle(handle);
     }
 
     private static class NativeMethods

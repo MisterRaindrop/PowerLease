@@ -11,6 +11,53 @@ public sealed record PowerCapabilitySnapshot(
     bool? RunningOnBattery,
     IReadOnlyList<string> Unavailable);
 
+internal interface IPowerCapabilityNativeMethods
+{
+    uint PowerGetActiveScheme(IntPtr userRootPowerKey, out IntPtr activePolicyGuid);
+
+    uint PowerReadACValue(
+        IntPtr rootPowerKey,
+        ref Guid schemeGuid,
+        ref Guid subgroupGuid,
+        ref Guid powerSettingGuid,
+        out uint type,
+        out uint buffer,
+        ref uint bufferSize);
+
+    uint PowerReadDCValue(
+        IntPtr rootPowerKey,
+        ref Guid schemeGuid,
+        ref Guid subgroupGuid,
+        ref Guid powerSettingGuid,
+        out uint type,
+        out uint buffer,
+        ref uint bufferSize);
+
+    bool GetPwrCapabilities(out SystemPowerCapabilities capabilities);
+
+    bool GetSystemPowerStatus(out SystemPowerStatus systemPowerStatus);
+
+    IntPtr LocalFree(IntPtr memory);
+
+    int GetLastError();
+}
+
+// SYSTEM_POWER_CAPABILITIES is 76 bytes in the Windows SDK ABI; AoAc is the byte at offset 20.
+[StructLayout(LayoutKind.Explicit, Size = 76)]
+internal struct SystemPowerCapabilities
+{
+    [FieldOffset(20)]
+    public byte AoAc;
+}
+
+// SYSTEM_POWER_STATUS is 12 bytes; ACLineStatus is its first byte.
+[StructLayout(LayoutKind.Explicit, Size = 12)]
+internal struct SystemPowerStatus
+{
+    [FieldOffset(0)]
+    public byte AcLineStatus;
+}
+
 /// <summary>
 /// Reads what the machine's power configuration allows.
 /// <para>
@@ -37,6 +84,19 @@ public sealed class PowerCapabilityProbe : IPowerCapabilityProbe
     // GUID_ALLOW_SYSTEM_REQUIRED: "Allow system required requests" (powercfg alias SYSTEMREQUIRED).
     private static readonly Guid AllowSystemRequired = new("A4B195F5-8225-47D8-8012-9D41369786E2");
 
+    private readonly IPowerCapabilityNativeMethods _native;
+
+    public PowerCapabilityProbe()
+        : this(new WindowsPowerCapabilityNativeMethods())
+    {
+    }
+
+    internal PowerCapabilityProbe(IPowerCapabilityNativeMethods native)
+    {
+        ArgumentNullException.ThrowIfNull(native);
+        _native = native;
+    }
+
     public PowerCapabilitySnapshot Read()
     {
         var unavailable = new List<string>();
@@ -52,7 +112,7 @@ public sealed class PowerCapabilityProbe : IPowerCapabilityProbe
             unavailable.ToArray());
     }
 
-    private static (bool? OnMains, bool? OnBattery) ReadSystemRequiredPolicy(List<string> unavailable)
+    private (bool? OnMains, bool? OnBattery) ReadSystemRequiredPolicy(List<string> unavailable)
     {
         IntPtr schemePointer = IntPtr.Zero;
         try
@@ -60,24 +120,25 @@ public sealed class PowerCapabilityProbe : IPowerCapabilityProbe
             uint status;
             try
             {
-                status = NativeMethods.PowerGetActiveScheme(IntPtr.Zero, out schemePointer);
+                status = _native.PowerGetActiveScheme(IntPtr.Zero, out schemePointer);
             }
             catch (DllNotFoundException exception)
             {
-                unavailable.Add($"PowerGetActiveScheme could not be called: {exception.Message}");
+                RecordPolicyUnavailable(unavailable, $"PowerGetActiveScheme could not be called: {exception.Message}");
                 return (null, null);
             }
             catch (EntryPointNotFoundException exception)
             {
-                unavailable.Add($"PowerGetActiveScheme is not available: {exception.Message}");
+                RecordPolicyUnavailable(unavailable, $"PowerGetActiveScheme is not available: {exception.Message}");
                 return (null, null);
             }
 
             if (status != ErrorSuccess || schemePointer == IntPtr.Zero)
             {
-                unavailable.Add(
+                RecordPolicyUnavailable(
+                    unavailable,
                     status == ErrorSuccess
-                        ? "PowerGetActiveScheme returned no active scheme; mains and battery policy are unknown."
+                        ? "PowerGetActiveScheme returned no active scheme."
                         : $"PowerGetActiveScheme failed: {DescribeStatus(status)}");
                 return (null, null);
             }
@@ -89,7 +150,9 @@ public sealed class PowerCapabilityProbe : IPowerCapabilityProbe
             }
             catch (ArgumentException exception)
             {
-                unavailable.Add($"PowerGetActiveScheme returned an unreadable scheme identifier: {exception.Message}");
+                RecordPolicyUnavailable(
+                    unavailable,
+                    $"PowerGetActiveScheme returned an unreadable scheme identifier: {exception.Message}");
                 return (null, null);
             }
 
@@ -101,12 +164,12 @@ public sealed class PowerCapabilityProbe : IPowerCapabilityProbe
         {
             if (schemePointer != IntPtr.Zero)
             {
-                _ = NativeMethods.LocalFree(schemePointer);
+                _ = _native.LocalFree(schemePointer);
             }
         }
     }
 
-    private static bool? ReadPolicyValue(Guid scheme, bool useAcValue, List<string> unavailable)
+    private bool? ReadPolicyValue(Guid scheme, bool useAcValue, List<string> unavailable)
     {
         var subgroup = SleepSubgroup;
         var setting = AllowSystemRequired;
@@ -118,7 +181,7 @@ public sealed class PowerCapabilityProbe : IPowerCapabilityProbe
         try
         {
             status = useAcValue
-                ? NativeMethods.PowerReadACValue(
+                ? _native.PowerReadACValue(
                     IntPtr.Zero,
                     ref scheme,
                     ref subgroup,
@@ -126,7 +189,7 @@ public sealed class PowerCapabilityProbe : IPowerCapabilityProbe
                     out type,
                     out value,
                     ref size)
-                : NativeMethods.PowerReadDCValue(
+                : _native.PowerReadDCValue(
                     IntPtr.Zero,
                     ref scheme,
                     ref subgroup,
@@ -163,18 +226,18 @@ public sealed class PowerCapabilityProbe : IPowerCapabilityProbe
         return value == 1;
     }
 
-    private static bool? ReadModernStandby(List<string> unavailable)
+    private bool? ReadModernStandby(List<string> unavailable)
     {
         try
         {
-            if (NativeMethods.GetPwrCapabilities(out var capabilities))
+            if (_native.GetPwrCapabilities(out var capabilities))
             {
                 return capabilities.AoAc != 0;
             }
 
             unavailable.Add(
                 $"GetPwrCapabilities failed, so modern standby is unknown: " +
-                $"{new Win32Exception(Marshal.GetLastPInvokeError()).Message}");
+                $"{new Win32Exception(_native.GetLastError()).Message}");
         }
         catch (DllNotFoundException exception)
         {
@@ -188,15 +251,15 @@ public sealed class PowerCapabilityProbe : IPowerCapabilityProbe
         return null;
     }
 
-    private static bool? ReadBatteryState(List<string> unavailable)
+    private bool? ReadBatteryState(List<string> unavailable)
     {
         try
         {
-            if (!NativeMethods.GetSystemPowerStatus(out var status))
+            if (!_native.GetSystemPowerStatus(out var status))
             {
                 unavailable.Add(
                     $"GetSystemPowerStatus failed, so the current power source is unknown: " +
-                    $"{new Win32Exception(Marshal.GetLastPInvokeError()).Message}");
+                    $"{new Win32Exception(_native.GetLastError()).Message}");
                 return null;
             }
 
@@ -225,26 +288,67 @@ public sealed class PowerCapabilityProbe : IPowerCapabilityProbe
         return null;
     }
 
+    private static void RecordPolicyUnavailable(List<string> unavailable, string detail)
+    {
+        unavailable.Add($"Keep-awake policy on mains is unknown: {detail}");
+        unavailable.Add($"Keep-awake policy on battery is unknown: {detail}");
+    }
+
     private static string PolicyCall(bool useAcValue) => useAcValue ? "PowerReadACValue" : "PowerReadDCValue";
 
     private static string DescribeStatus(uint status) =>
         $"{new Win32Exception(unchecked((int)status)).Message} (error {status})";
 
-    // SYSTEM_POWER_CAPABILITIES is 76 bytes in the Windows SDK ABI; AoAc is the byte at offset 20.
-    [StructLayout(LayoutKind.Explicit, Size = 76)]
-    private struct SystemPowerCapabilities
-    {
-        [FieldOffset(20)]
-        public byte AoAc;
-    }
+}
 
-    // SYSTEM_POWER_STATUS is 12 bytes; ACLineStatus is its first byte.
-    [StructLayout(LayoutKind.Explicit, Size = 12)]
-    private struct SystemPowerStatus
-    {
-        [FieldOffset(0)]
-        public byte AcLineStatus;
-    }
+internal sealed class WindowsPowerCapabilityNativeMethods : IPowerCapabilityNativeMethods
+{
+    public uint PowerGetActiveScheme(IntPtr userRootPowerKey, out IntPtr activePolicyGuid) =>
+        NativeMethods.PowerGetActiveScheme(userRootPowerKey, out activePolicyGuid);
+
+    public uint PowerReadACValue(
+        IntPtr rootPowerKey,
+        ref Guid schemeGuid,
+        ref Guid subgroupGuid,
+        ref Guid powerSettingGuid,
+        out uint type,
+        out uint buffer,
+        ref uint bufferSize) =>
+        NativeMethods.PowerReadACValue(
+            rootPowerKey,
+            ref schemeGuid,
+            ref subgroupGuid,
+            ref powerSettingGuid,
+            out type,
+            out buffer,
+            ref bufferSize);
+
+    public uint PowerReadDCValue(
+        IntPtr rootPowerKey,
+        ref Guid schemeGuid,
+        ref Guid subgroupGuid,
+        ref Guid powerSettingGuid,
+        out uint type,
+        out uint buffer,
+        ref uint bufferSize) =>
+        NativeMethods.PowerReadDCValue(
+            rootPowerKey,
+            ref schemeGuid,
+            ref subgroupGuid,
+            ref powerSettingGuid,
+            out type,
+            out buffer,
+            ref bufferSize);
+
+    public bool GetPwrCapabilities(out SystemPowerCapabilities capabilities) =>
+        NativeMethods.GetPwrCapabilities(out capabilities);
+
+    public bool GetSystemPowerStatus(out SystemPowerStatus systemPowerStatus) =>
+        NativeMethods.GetSystemPowerStatus(out systemPowerStatus);
+
+    public IntPtr LocalFree(IntPtr memory) => NativeMethods.LocalFree(memory);
+
+    public int GetLastError() => Marshal.GetLastPInvokeError();
 
     private static class NativeMethods
     {

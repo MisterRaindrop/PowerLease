@@ -106,6 +106,119 @@ public sealed class ServiceHostTests
         Assert.Contains("not allowed", response.Error!, StringComparison.OrdinalIgnoreCase);
     }
 
+    [Fact]
+    public async Task A_bare_release_resolves_the_callers_only_active_hold()
+    {
+        LeaseCommand? dispatched = null;
+        var router = Router(
+            [Lease("mine", Caller().Sid), Lease("somebody-elses", "S-1-5-21-2000")],
+            command => dispatched = command);
+
+        var response = await router.HandleAsync(
+            ReleaseRequest(leaseId: null),
+            Caller(),
+            TestContext.Current.CancellationToken);
+
+        Assert.True(response.Accepted, response.Error);
+        Assert.NotNull(dispatched);
+        Assert.Equal("mine", dispatched!.LeaseId);
+    }
+
+    [Fact]
+    public async Task A_bare_release_explains_when_the_caller_has_no_active_hold()
+    {
+        var dispatched = false;
+        var router = Router([Lease("somebody-elses", "S-1-5-21-2000")], _ => dispatched = true);
+
+        var response = await router.HandleAsync(
+            ReleaseRequest(leaseId: null),
+            Caller(),
+            TestContext.Current.CancellationToken);
+
+        Assert.False(response.Accepted);
+        Assert.False(dispatched);
+        Assert.Contains("no active holds", response.Error!, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task A_bare_release_asks_for_an_identifier_when_the_caller_has_several_holds()
+    {
+        var dispatched = false;
+        var router = Router(
+            [Lease("first", Caller().Sid), Lease("second", Caller().Sid)],
+            _ => dispatched = true);
+
+        var response = await router.HandleAsync(
+            ReleaseRequest(leaseId: null),
+            Caller(),
+            TestContext.Current.CancellationToken);
+
+        Assert.False(response.Accepted);
+        Assert.False(dispatched);
+        Assert.Contains("more than one", response.Error!, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("identifier", response.Error!, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Unreasonably_long_create_and_renew_requests_are_refused_before_dispatch()
+    {
+        var dispatched = false;
+        var router = Router([], _ => dispatched = true);
+        var create = new RequestEnvelope(
+            IpcProtocol.Version,
+            Guid.NewGuid(),
+            IpcMethods.CreateLease,
+            JsonSerializer.Serialize(new CreateLeasePayload(TimeSpan.FromDays(8), null), Json));
+        var renew = new RequestEnvelope(
+            IpcProtocol.Version,
+            Guid.NewGuid(),
+            IpcMethods.RenewLease,
+            JsonSerializer.Serialize(new RenewLeasePayload("lease-1", TimeSpan.FromDays(8)), Json));
+
+        var createResponse = await router.HandleAsync(create, Caller(), TestContext.Current.CancellationToken);
+        var renewResponse = await router.HandleAsync(renew, Caller(), TestContext.Current.CancellationToken);
+
+        Assert.False(createResponse.Accepted);
+        Assert.False(renewResponse.Accepted);
+        Assert.False(dispatched);
+        Assert.Contains("7 days", createResponse.Error!, StringComparison.Ordinal);
+        Assert.Contains("7 days", renewResponse.Error!, StringComparison.Ordinal);
+    }
+
+    private static IpcRequestRouter Router(
+        IReadOnlyList<KeepAwakeLease> leases,
+        Action<LeaseCommand> onDispatch) =>
+        new(
+            () => KernelSnapshot.Initial,
+            () => new LeaseLoadResult(leases, []),
+            () => new PowerCapabilitySnapshot(null, null, null, null, []),
+            (command, _) =>
+            {
+                onDispatch(command);
+                return Task.FromResult(
+                    new LeaseCommandResult(command.RequestId, LeaseCommandStatus.Released, command.LeaseId));
+            },
+            new FakeClock());
+
+    private static RequestEnvelope ReleaseRequest(string? leaseId) =>
+        new(
+            IpcProtocol.Version,
+            Guid.NewGuid(),
+            IpcMethods.ReleaseLease,
+            JsonSerializer.Serialize(new ReleaseLeasePayload(leaseId), Json));
+
+    private static KeepAwakeLease Lease(string id, string ownerSid) => new()
+    {
+        Id = id,
+        Source = LeaseSource.Cli,
+        OwnerSid = ownerSid,
+        StartedAtUtc = DateTimeOffset.UnixEpoch,
+        ExpiresAtUtc = DateTimeOffset.UnixEpoch + TimeSpan.FromHours(1),
+        Status = LeaseStatus.Active,
+        EpochId = Guid.Empty,
+        OriginalDuration = TimeSpan.FromHours(1)
+    };
+
     private static CallerSnapshot Caller() => new()
     {
         Sid = "S-1-5-21-1000",

@@ -340,9 +340,22 @@ public sealed class CommandsTests
     [InlineData("3x")]
     [InlineData("0h")]
     [InlineData("-2h")]
+    [InlineData("1e308h")]
+    [InlineData("1e308m")]
+    [InlineData("1e308s")]
+    [InlineData("Infinityh")]
     public void A_duration_that_is_not_one_is_refused(string? text)
     {
         Assert.False(Commands.TryParseDuration(text, out _));
+    }
+
+    [Fact]
+    public void The_largest_whole_hour_that_fits_is_accepted_and_the_next_is_refused()
+    {
+        Assert.True(Commands.TryParseDuration("256204778h", out var duration));
+        Assert.Equal(TimeSpan.FromHours(256204778), duration);
+
+        Assert.False(Commands.TryParseDuration("256204779h", out _));
     }
 
     [Fact]
