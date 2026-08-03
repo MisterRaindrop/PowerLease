@@ -155,46 +155,46 @@ internal sealed class IpcRequestRouter
             switch (kind)
             {
                 case LeaseCommandKind.Create:
-                {
-                    var payload = JsonSerializer.Deserialize<CreateLeasePayload>(request.PayloadJson ?? "{}", Json);
-                    if (payload is null || payload.Duration <= TimeSpan.Zero)
                     {
-                        error = "CreateLease requires a positive duration.";
-                        return false;
-                    }
+                        var payload = JsonSerializer.Deserialize<CreateLeasePayload>(request.PayloadJson ?? "{}", Json);
+                        if (payload is null || payload.Duration <= TimeSpan.Zero)
+                        {
+                            error = "CreateLease requires a positive duration.";
+                            return false;
+                        }
 
-                    leaseId = $"cli:{request.RequestId:N}";
-                    duration = payload.Duration;
-                    reason = payload.Reason;
-                    return true;
-                }
+                        leaseId = $"cli:{request.RequestId:N}";
+                        duration = payload.Duration;
+                        reason = payload.Reason;
+                        return true;
+                    }
 
                 case LeaseCommandKind.Renew:
-                {
-                    var payload = JsonSerializer.Deserialize<RenewLeasePayload>(request.PayloadJson ?? "{}", Json);
-                    if (payload is null || string.IsNullOrWhiteSpace(payload.LeaseId) || payload.Duration <= TimeSpan.Zero)
                     {
-                        error = "RenewLease requires a leaseId and a positive duration.";
-                        return false;
-                    }
+                        var payload = JsonSerializer.Deserialize<RenewLeasePayload>(request.PayloadJson ?? "{}", Json);
+                        if (payload is null || string.IsNullOrWhiteSpace(payload.LeaseId) || payload.Duration <= TimeSpan.Zero)
+                        {
+                            error = "RenewLease requires a leaseId and a positive duration.";
+                            return false;
+                        }
 
-                    leaseId = payload.LeaseId;
-                    duration = payload.Duration;
-                    return true;
-                }
+                        leaseId = payload.LeaseId;
+                        duration = payload.Duration;
+                        return true;
+                    }
 
                 case LeaseCommandKind.Release:
-                {
-                    var payload = JsonSerializer.Deserialize<ReleaseLeasePayload>(request.PayloadJson ?? "{}", Json);
-                    if (payload is null || string.IsNullOrWhiteSpace(payload.LeaseId))
                     {
-                        error = "ReleaseLease requires a leaseId.";
-                        return false;
-                    }
+                        var payload = JsonSerializer.Deserialize<ReleaseLeasePayload>(request.PayloadJson ?? "{}", Json);
+                        if (payload is null || string.IsNullOrWhiteSpace(payload.LeaseId))
+                        {
+                            error = "ReleaseLease requires a leaseId.";
+                            return false;
+                        }
 
-                    leaseId = payload.LeaseId;
-                    return true;
-                }
+                        leaseId = payload.LeaseId;
+                        return true;
+                    }
 
                 default:
                     error = "The command kind is not supported.";
