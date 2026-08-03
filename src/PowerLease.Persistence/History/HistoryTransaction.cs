@@ -138,12 +138,12 @@ public sealed class HistoryTransaction : IDisposable
 
         using var command = Command("""
             INSERT INTO keep_awake_leases (
-                id, source, reason, owner_user, remote_ip, process_id, process_name,
+                id, source, reason, owner_user, owner_sid, remote_ip, process_id, process_name,
                 started_at_utc, expires_at_utc, last_renewed_at_utc, auto_renew, status,
                 ended_at_utc, end_reason, epoch_id, original_duration_seconds,
                 last_renew_duration_seconds, remaining_at_checkpoint_seconds, checkpoint_utc)
             VALUES (
-                $id, $source, $reason, $ownerUser, $remoteIp, $processId, $processName,
+                $id, $source, $reason, $ownerUser, $ownerSid, $remoteIp, $processId, $processName,
                 $startedAt, $expiresAt, $lastRenewedAt, $autoRenew, $status,
                 $endedAt, $endReason, $epochId, $originalDuration,
                 $lastRenewDuration, $remainingAtCheckpoint, $checkpointUtc)
@@ -151,6 +151,7 @@ public sealed class HistoryTransaction : IDisposable
                 source = excluded.source,
                 reason = excluded.reason,
                 owner_user = excluded.owner_user,
+                owner_sid = excluded.owner_sid,
                 remote_ip = excluded.remote_ip,
                 process_id = excluded.process_id,
                 process_name = excluded.process_name,
@@ -172,6 +173,7 @@ public sealed class HistoryTransaction : IDisposable
         command.Parameters.AddWithValue("$source", lease.Source.ToString());
         AddNullable(command, "$reason", lease.Reason);
         AddNullable(command, "$ownerUser", lease.OwnerUser);
+        AddNullable(command, "$ownerSid", lease.OwnerSid);
         AddNullable(command, "$remoteIp", lease.RemoteIp);
         AddNullable(command, "$processId", lease.ProcessId);
         AddNullable(command, "$processName", lease.ProcessName);

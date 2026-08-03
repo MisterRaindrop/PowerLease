@@ -17,6 +17,18 @@ public sealed record KeepAwakeLease
     /// <summary>Windows account the lease belongs to, when it has one.</summary>
     public string? OwnerUser { get; init; }
 
+    /// <summary>
+    /// The security identifier of the account the lease belongs to, which is what decides who may renew or
+    /// release it.
+    /// <para>
+    /// Persisted rather than derived, because the alternative -- resolving <see cref="OwnerUser" /> back to a
+    /// security identifier when the lease is read after a restart -- can resolve to a different account or fail
+    /// altogether, and both answers are wrong in a way nobody would notice. Null means the owner is not known,
+    /// which the kernel treats as administrator-only.
+    /// </para>
+    /// </summary>
+    public string? OwnerSid { get; init; }
+
     public string? RemoteIp { get; init; }
 
     public int? ProcessId { get; init; }

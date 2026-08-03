@@ -77,7 +77,8 @@ public sealed class SqliteHistoryStore : IDisposable
             SELECT id, source, reason, owner_user, remote_ip, process_id, process_name,
                    started_at_utc, expires_at_utc, last_renewed_at_utc, auto_renew, status,
                    ended_at_utc, end_reason, epoch_id, original_duration_seconds,
-                   last_renew_duration_seconds, remaining_at_checkpoint_seconds, checkpoint_utc
+                   last_renew_duration_seconds, remaining_at_checkpoint_seconds, checkpoint_utc,
+                   owner_sid
             FROM keep_awake_leases
             WHERE $status IS NULL OR status = $status
             ORDER BY started_at_utc, id;
@@ -126,7 +127,8 @@ public sealed class SqliteHistoryStore : IDisposable
             OriginalDuration = TimeSpan.FromSeconds(reader.GetDouble(15)),
             LastRenewDuration = SecondsOrNull(reader, 16),
             RemainingAtCheckpoint = SecondsOrNull(reader, 17),
-            CheckpointUtc = Timestamps.ParseOrNull(TextOrNull(reader, 18))
+            CheckpointUtc = Timestamps.ParseOrNull(TextOrNull(reader, 18)),
+            OwnerSid = TextOrNull(reader, 19)
         };
     }
 

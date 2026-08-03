@@ -83,6 +83,83 @@ public sealed class InhibitKernel
     /// </summary>
     public bool RaiseEmergencyInhibit(string reason) => _emergency.Raise(reason);
 
+    /// <summary>
+    /// Take on leases that were granted before this process started, read back from storage.
+    /// <para>
+    /// Without this the whole lease mechanism ends at the process boundary. Everything else is in place --
+    /// the rows are written, the epoch and checkpoint columns are stored, and
+    /// <see cref="LeaseDeadline.Resume" /> knows how to re-grant them -- but nothing joined them up, so a
+    /// service restart began with no leases at all. Somebody's three-hour hold would be gone the moment the
+    /// service was restarted, and the machine would be released while they were still connected. That is the
+    /// one direction this product must never fail in, which is why this is a distinct call the host cannot
+    /// forget rather than an optional argument.
+    /// </para>
+    /// <para>
+    /// A lease is re-granted its checkpointed remaining time measured from now, never less. Time the service
+    /// spent down is not time the user got what they asked for.
+    /// </para>
+    /// </summary>
+    /// <param name="stored">
+    /// What storage returned. Anything that is not <see cref="LeaseStatus.Active" /> is history and is
+    /// ignored; unreadable rows are the host's to report as a fault, since only it knows there were any.
+    /// </param>
+    /// <returns>The identifiers actually taken on, in the order given.</returns>
+    /// <exception cref="InvalidOperationException">
+    /// Thrown when the kernel has already evaluated. Restoring afterwards would mean a lease appearing out of
+    /// storage in the middle of a decision, and would leave at least one published snapshot that said the
+    /// machine had no reason to stay awake when it did.
+    /// </exception>
+    public IReadOnlyList<string> Restore(IReadOnlyList<KeepAwakeLease> stored)
+    {
+        ArgumentNullException.ThrowIfNull(stored);
+
+        if (_revision != 0)
+        {
+            throw new InvalidOperationException(
+                "Leases must be restored before the kernel evaluates for the first time.");
+        }
+
+        var now = _clock.Now;
+        var nowUtc = _clock.UtcNow;
+        var restored = new List<string>();
+
+        foreach (var lease in stored)
+        {
+            if (lease.Status != LeaseStatus.Active || _leases.ContainsKey(lease.Id))
+            {
+                continue;
+            }
+
+            var resumed = LeaseDeadline.Resume(lease.TryGetCheckpoint(), lease.OriginalDuration, now);
+
+            _leases[lease.Id] = new TrackedLease
+            {
+                // Everything else about the lease is kept exactly as it was stored -- who it belongs to, when
+                // it began, and the largest duration it was ever granted. Re-creating it instead would reset
+                // all three, and the owner would no longer be able to release their own hold.
+                Lease = lease with
+                {
+                    EpochId = now.EpochId,
+                    RemainingAtCheckpoint = resumed.Deadline.RemainingAt(now),
+                    CheckpointUtc = nowUtc
+                },
+                Deadline = resumed.Deadline,
+
+                // It came out of the database, so it is already durable. Marking it provisional would make the
+                // first write failure delete a lease that exists.
+                Commit = LeaseCommitState.Committed,
+
+                // Null, so the first evaluation writes the re-granted checkpoint down. Until it does, another
+                // restart would read the old one and re-grant from that instead.
+                CheckpointWrittenAt = null
+            };
+
+            restored.Add(lease.Id);
+        }
+
+        return restored;
+    }
+
     /// <summary>Whether the emergency switch is currently thrown.</summary>
     public bool EmergencyInhibitRaised => _emergency.IsRaised;
 
@@ -298,6 +375,7 @@ public sealed class InhibitKernel
 
         ExpireLeases(now, nowUtc);
         RefreshLeaseCheckpoints(now, nowUtc);
+        PersistDueCheckpoints(now);
         DropAbandonedEffects();
 
         // Before the reports are gathered, not after. Lowering the alarm afterwards would publish a
@@ -611,6 +689,56 @@ public sealed class InhibitKernel
         }
     }
 
+    /// <summary>
+    /// Write down how much of each running lease is left, from time to time.
+    /// <para>
+    /// <see cref="RefreshLeaseCheckpoints" /> keeps the number correct in memory, which is enough to survive a
+    /// resume but not a restart -- memory is exactly what a restart loses. Until this ran, the stored
+    /// checkpoint was whatever the lease was created or renewed with, so every restart re-granted the lease
+    /// its original duration and a machine that restarted often enough held a finished lease for ever.
+    /// </para>
+    /// <para>
+    /// Nobody is waiting on these writes, and a failed one is not a reason to stay awake in itself: it means
+    /// the lease will be re-granted more time than it had left, which holds the machine longer rather than
+    /// releasing it early. It is still reported, because it is the mechanism that lets a lease end.
+    /// </para>
+    /// </summary>
+    private void PersistDueCheckpoints(MonotonicStamp now)
+    {
+        if (_options.LeaseCheckpointInterval <= TimeSpan.Zero)
+        {
+            return;
+        }
+
+        foreach (var tracked in _leases.Values)
+        {
+            // Only what is already durable and measured against this clock. A provisional lease has a write in
+            // flight that carries the same checkpoint, and one awaiting re-establishment has a remaining time
+            // that cannot be read yet.
+            if (tracked.Commit != LeaseCommitState.Committed || !tracked.Deadline.IsInEpoch(now.EpochId))
+            {
+                continue;
+            }
+
+            if (tracked.CheckpointWrittenAt is { } written
+                && written.EpochId == now.EpochId
+                && now.Elapsed - written.Elapsed < _options.LeaseCheckpointInterval)
+            {
+                continue;
+            }
+
+            tracked.CheckpointWrittenAt = now;
+
+            Emit(new KernelEffect
+            {
+                EffectId = ++_nextEffectId,
+                Kind = EffectKind.PersistLease,
+                Lease = tracked.Lease,
+                Revision = _revision
+            });
+        }
+    }
+
     private void Create(LeaseCommand command, MonotonicStamp now)
     {
         if (string.IsNullOrEmpty(command.LeaseId))
@@ -638,6 +766,7 @@ public sealed class InhibitKernel
             Source = command.Source,
             Reason = command.Reason,
             OwnerUser = command.Caller.AccountName,
+            OwnerSid = command.Caller.Sid,
             StartedAtUtc = nowUtc,
             ExpiresAtUtc = nowUtc + command.Duration,
             AutoRenew = false,
@@ -654,7 +783,9 @@ public sealed class InhibitKernel
             Lease = lease,
             Deadline = LeaseDeadline.Grant(now, command.Duration),
             Commit = LeaseCommitState.Provisional,
-            OwnerSid = command.Caller.Sid
+
+            // The effect below writes this lease, checkpoint included, so the clock starts now.
+            CheckpointWrittenAt = now
         };
 
         EmitLeaseEffect(EffectKind.PersistLease, command, lease, LeaseCommandStatus.Created);
@@ -749,8 +880,18 @@ public sealed class InhibitKernel
         EmitLeaseEffect(EffectKind.PersistLeaseRelease, command, tracked.Lease, LeaseCommandStatus.Released);
     }
 
+    /// <summary>
+    /// Whether this caller may renew or release this lease.
+    /// <para>
+    /// A lease with no recorded owner is administrator-only. That is reachable for a lease written by a build
+    /// that did not store the owner, and guessing in the other direction would hand a stranger's hold to
+    /// whoever asked first.
+    /// </para>
+    /// </summary>
     private static bool MayChange(CallerSnapshot caller, TrackedLease tracked) =>
-        caller.IsAdministrator || string.Equals(caller.Sid, tracked.OwnerSid, StringComparison.Ordinal);
+        caller.IsAdministrator
+        || (tracked.Lease.OwnerSid is { Length: > 0 } owner
+            && string.Equals(caller.Sid, owner, StringComparison.Ordinal));
 
     private void EmitLeaseEffect(
         EffectKind kind,
@@ -812,15 +953,22 @@ public sealed class InhibitKernel
 
         if (pending.RequestId is not { } requestId)
         {
-            // Nobody is waiting on this one -- it records a lease the kernel ended by itself. Only its failure
-            // matters, and that is handled below.
+            // Nobody is waiting on this one -- the kernel wrote it for itself, either to record a lease it
+            // ended or to keep the stored remaining time current. Only whether it worked matters.
             if (completion.Outcome != EffectOutcome.Succeeded)
             {
                 _faults.Report(
                     PersistFaultKey(leaseId),
                     FaultSeverity.Transient,
-                    $"The end of lease '{leaseId}' could not be recorded: {completion.Error}",
+                    $"Lease '{leaseId}' could not be written: {completion.Error}",
                     _clock.UtcNow);
+            }
+            else
+            {
+                // Success has to be reported as well, or one failed write would hold the machine awake for
+                // the life of the process. Checkpoints are written repeatedly, so a fault raised by a passing
+                // disk problem clears itself on the next round; without this it never could.
+                _faults.ReportHealthy(PersistFaultKey(leaseId));
             }
 
             return;
@@ -1102,7 +1250,12 @@ public sealed class InhibitKernel
 
         public required LeaseCommitState Commit { get; set; }
 
-        public required string OwnerSid { get; init; }
+        /// <summary>
+        /// When this lease's remaining time was last written to disk, or null if it has not been since the
+        /// kernel took it on. Measured monotonically, so a wall-clock adjustment cannot make a checkpoint
+        /// look fresher than it is.
+        /// </summary>
+        public MonotonicStamp? CheckpointWrittenAt { get; set; }
     }
 
     private sealed class PendingEffect

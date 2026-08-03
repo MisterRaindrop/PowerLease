@@ -29,6 +29,10 @@ public sealed class SqliteHistoryStoreTests
         Assert.Equal(lease.Source, loaded.Source);
         Assert.Equal(lease.Reason, loaded.Reason);
         Assert.Equal(lease.OwnerUser, loaded.OwnerUser);
+
+        // Not the account name: this is what decides who may end the lease after a restart, and resolving a
+        // name back to an identifier on the way in can land on a different account.
+        Assert.Equal(lease.OwnerSid, loaded.OwnerSid);
         Assert.Equal(lease.RemoteIp, loaded.RemoteIp);
         Assert.Equal(lease.ProcessId, loaded.ProcessId);
         Assert.Equal(lease.ProcessName, loaded.ProcessName);

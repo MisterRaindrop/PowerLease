@@ -37,6 +37,22 @@ public sealed record KernelOptions
     public int ConsecutiveHealthyToClearTransient { get; init; } = 3;
 
     /// <summary>
+    /// How often a running lease's remaining time is written to disk.
+    /// <para>
+    /// This is what makes a restart honest. A lease is re-established from its stored checkpoint, and the
+    /// checkpoint is the only evidence of how much of it is left -- so if it were written only when the lease
+    /// was created or renewed, every restart would hand back the duration the lease began with. On a machine
+    /// that crashes and restarts, a three-hour hold would never end.
+    /// </para>
+    /// <para>
+    /// The interval is the amount of lease progress a crash may lose, and losing progress means holding for
+    /// longer, which is the safe direction. Set it to zero to stop writing checkpoints, which is only
+    /// sensible in a test.
+    /// </para>
+    /// </summary>
+    public TimeSpan LeaseCheckpointInterval { get; init; } = TimeSpan.FromMinutes(2);
+
+    /// <summary>
     /// Sources that must be reporting for a release to mean anything. Anything in this set that goes quiet
     /// holds the machine awake; anything missing from it is simply never consulted.
     /// <para>

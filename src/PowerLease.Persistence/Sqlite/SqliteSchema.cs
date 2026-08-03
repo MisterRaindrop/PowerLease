@@ -38,6 +38,11 @@ public static class SqliteSchema
             source                          TEXT NOT NULL,
             reason                          TEXT,
             owner_user                      TEXT,
+
+            -- Who may renew or release this lease after a restart. Stored rather than resolved from
+            -- owner_user on the way back in, because that resolution can quietly land on a different
+            -- account. Null means unknown, which the kernel treats as administrator-only.
+            owner_sid                       TEXT,
             remote_ip                       TEXT,
             process_id                      INTEGER,
             process_name                    TEXT,
