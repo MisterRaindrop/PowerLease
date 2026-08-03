@@ -4,7 +4,8 @@ namespace PowerLease.Cli;
 
 public static class Program
 {
-    public static Task<int> Main(string[] args) => RunAsync(args, client: null, Console.Out, CancellationToken.None);
+    public static Task<int> Main(string[] args) =>
+        RunAsync(args, new PowerLeaseClient(), Console.Out, CancellationToken.None);
 
     /// <summary>
     /// Parse the arguments and run the command.

@@ -285,9 +285,4 @@ internal sealed class IpcRequestRouter
         }
     }
 
-    private sealed record CreateLeasePayload(TimeSpan Duration, string? Reason);
-
-    private sealed record RenewLeasePayload(string? LeaseId, TimeSpan Duration);
-
-    private sealed record ReleaseLeasePayload(string? LeaseId);
 }
