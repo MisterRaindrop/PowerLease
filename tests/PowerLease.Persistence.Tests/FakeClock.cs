@@ -25,4 +25,10 @@ internal sealed class FakeClock : IClock
         UtcNow = UtcNow.Add(amount);
         Elapsed += amount;
     }
+
+    public void BeginNewEpoch()
+    {
+        EpochId = Guid.NewGuid();
+        Elapsed = TimeSpan.Zero;
+    }
 }

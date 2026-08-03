@@ -30,6 +30,12 @@ public sealed class InhibitKernel
     /// </summary>
     private const int AbandonedEffectRevisions = 1000;
 
+    /// <summary>
+    /// The longest lease the kernel accepts. Thirty days covers plausible unattended work without letting an
+    /// accidental or hostile near-infinite duration reach deadline arithmetic or pin a machine for centuries.
+    /// </summary>
+    public static TimeSpan MaximumLeaseDuration { get; } = TimeSpan.FromDays(30);
+
     private readonly KernelOptions _options;
     private readonly PowerInhibitCoordinator _power;
     private readonly IClock _clock;
@@ -100,16 +106,16 @@ public sealed class InhibitKernel
     /// </para>
     /// </summary>
     /// <param name="stored">
-    /// What storage returned. Anything that is not <see cref="LeaseStatus.Active" /> is history and is
-    /// ignored; unreadable rows are the host's to report as a fault, since only it knows there were any.
+    /// What storage returned. A valid lease that is not <see cref="LeaseStatus.Active" /> is history and is
+    /// ignored. Invalid active rows and unrecognised statuses are returned for the host to latch as a fault.
     /// </param>
-    /// <returns>The identifiers actually taken on, in the order given.</returns>
+    /// <returns>The identifiers actually taken on and any active rows that could not safely be used.</returns>
     /// <exception cref="InvalidOperationException">
     /// Thrown when the kernel has already evaluated. Restoring afterwards would mean a lease appearing out of
     /// storage in the middle of a decision, and would leave at least one published snapshot that said the
     /// machine had no reason to stay awake when it did.
     /// </exception>
-    public IReadOnlyList<string> Restore(IReadOnlyList<KeepAwakeLease> stored)
+    public LeaseRestoreResult Restore(IReadOnlyList<KeepAwakeLease> stored)
     {
         ArgumentNullException.ThrowIfNull(stored);
 
@@ -122,15 +128,42 @@ public sealed class InhibitKernel
         var now = _clock.Now;
         var nowUtc = _clock.UtcNow;
         var restored = new List<string>();
+        var invalid = new List<string>();
 
         foreach (var lease in stored)
         {
-            if (lease.Status != LeaseStatus.Active || _leases.ContainsKey(lease.Id))
+            if (lease is null)
+            {
+                invalid.Add("(no identifier): the stored lease was missing.");
+                continue;
+            }
+
+            if (!Enum.IsDefined(lease.Status))
+            {
+                invalid.Add($"{DisplayLeaseId(lease.Id)}: lease status '{lease.Status}' is not supported.");
+                continue;
+            }
+
+            if (lease.Status != LeaseStatus.Active)
             {
                 continue;
             }
 
+            var validationError = ValidateStoredLease(lease);
+            if (validationError is not null)
+            {
+                invalid.Add($"{DisplayLeaseId(lease.Id)}: {validationError}");
+                continue;
+            }
+
+            if (_leases.ContainsKey(lease.Id))
+            {
+                invalid.Add($"{lease.Id}: more than one active stored lease used this identifier.");
+                continue;
+            }
+
             var resumed = LeaseDeadline.Resume(lease.TryGetCheckpoint(), lease.OriginalDuration, now);
+            var remaining = resumed.Deadline.RemainingAt(now);
 
             _leases[lease.Id] = new TrackedLease
             {
@@ -140,14 +173,14 @@ public sealed class InhibitKernel
                 Lease = lease with
                 {
                     EpochId = now.EpochId,
-                    RemainingAtCheckpoint = resumed.Deadline.RemainingAt(now),
+                    RemainingAtCheckpoint = remaining,
                     CheckpointUtc = nowUtc,
 
                     // Moved forward with the re-grant, even though this field is for display only. It was
                     // written before the service went down, so leaving it alone would leave it in the past
                     // for any outage longer than the lease -- and `powerlease list` works out the time
                     // remaining from it, so it would report "0m left" for a lease with hours to run.
-                    ExpiresAtUtc = nowUtc + resumed.Deadline.RemainingAt(now)
+                    ExpiresAtUtc = AddUtcSaturating(nowUtc, remaining)
                 },
                 Deadline = resumed.Deadline,
 
@@ -163,7 +196,7 @@ public sealed class InhibitKernel
             restored.Add(lease.Id);
         }
 
-        return restored;
+        return new LeaseRestoreResult(restored, invalid);
     }
 
     /// <summary>Whether the emergency switch is currently thrown.</summary>
@@ -268,6 +301,10 @@ public sealed class InhibitKernel
         switch (message)
         {
             case ResumedFromSleep resumed:
+                // The host restarts the clock before delivering this message. Remembering the new epoch here
+                // prevents the fallback in Step from handling the same resume a second time.
+                _lastSeenEpoch = now.EpochId;
+
                 // Grace first, then let go of the request. Ordered this way because the unconditional reason to
                 // stay awake must be in place before the thing holding the machine awake is dropped; the reverse
                 // order leaves a window with neither if anything in between goes wrong.
@@ -539,9 +576,9 @@ public sealed class InhibitKernel
     {
         foreach (var (id, tracked) in _leases.ToArray())
         {
-            if (tracked.Commit == LeaseCommitState.ReleasePending)
+            if (tracked.Commit is LeaseCommitState.ReleasePending or LeaseCommitState.ExpiryPending)
             {
-                // Its ending is already being made durable; expiry must not race that.
+                // Its ending is already being made durable; expiry must not race that write.
                 continue;
             }
 
@@ -557,15 +594,9 @@ public sealed class InhibitKernel
                 continue;
             }
 
-            _leases.Remove(id);
-
-            // A failed write for this lease no longer means anything: the lease is over.
-            _faults.Clear(PersistFaultKey(id));
-
-            // Record the ending. Unlike a release there is no ordering to respect -- protection is already
-            // gone -- but it does have to be written, because a row left saying "active" with time still on
-            // it would be re-granted that time on the next restart. A three-hour hold that ran out weeks ago
-            // would come back for three more hours, every time the machine started.
+            // Expiry reduces protection just like an explicit release. Keep the active lease as an inhibitor
+            // until the ending is durable; a stalled or failed disk write is not permission to let it go.
+            tracked.Commit = LeaseCommitState.ExpiryPending;
             Emit(new KernelEffect
             {
                 EffectId = ++_nextEffectId,
@@ -579,28 +610,10 @@ public sealed class InhibitKernel
                     CheckpointUtc = nowUtc
                 },
                 Revision = _revision
-            });
+            }, LeaseEffectPurpose.Expiry);
         }
     }
 
-    /// <summary>
-    /// Put every lease back on the current monotonic clock.
-    /// <para>
-    /// The clock starts again after a resume and after the service restarts, and a lease measured against the
-    /// old one can never be found to have expired. Without this a lease that lived through a single resume
-    /// would hold the machine awake for as long as the service ran -- the failure that makes a power
-    /// management tool worse than not having one.
-    /// </para>
-    /// <para>
-    /// A lease whose ending is already being written is left alone: it is on its way out, and re-granting it
-    /// would resurrect it for a fresh duration.
-    /// </para>
-    /// <para>
-    /// Deliberately not persisted here. If the service dies before the next checkpoint is written, the stored
-    /// row still holds the older, larger remaining time, so the lease comes back holding for longer rather
-    /// than for less.
-    /// </para>
-    /// </summary>
     /// <summary>
     /// Notice a change of monotonic clock the kernel was never told about, and treat it as a resume.
     /// <para>
@@ -643,13 +656,18 @@ public sealed class InhibitKernel
         }
     }
 
+    /// <summary>
+    /// Put every running lease on the current monotonic clock after resume. Endings already being written are
+    /// left alone, and the new checkpoint is not persisted here: losing it can only re-grant too much time.
+    /// </summary>
     private void ReestablishLeases(MonotonicStamp now)
     {
         var nowUtc = _clock.UtcNow;
 
         foreach (var tracked in _leases.Values)
         {
-            if (tracked.Commit == LeaseCommitState.ReleasePending || tracked.Deadline.IsInEpoch(now.EpochId))
+            if (tracked.Commit is LeaseCommitState.ReleasePending or LeaseCommitState.ExpiryPending
+                || tracked.Deadline.IsInEpoch(now.EpochId))
             {
                 continue;
             }
@@ -682,7 +700,8 @@ public sealed class InhibitKernel
     {
         foreach (var tracked in _leases.Values)
         {
-            if (tracked.Commit == LeaseCommitState.ReleasePending || !tracked.Deadline.IsInEpoch(now.EpochId))
+            if (tracked.Commit is LeaseCommitState.ReleasePending or LeaseCommitState.ExpiryPending
+                || !tracked.Deadline.IsInEpoch(now.EpochId))
             {
                 continue;
             }
@@ -759,6 +778,12 @@ public sealed class InhibitKernel
             return;
         }
 
+        if (command.Duration > MaximumLeaseDuration)
+        {
+            Reject(command, $"A lease may not run for more than {MaximumLeaseDuration.TotalDays:0} days.");
+            return;
+        }
+
         if (_leases.ContainsKey(command.LeaseId))
         {
             Reject(command, $"Lease '{command.LeaseId}' already exists.");
@@ -774,7 +799,7 @@ public sealed class InhibitKernel
             OwnerUser = command.Caller.AccountName,
             OwnerSid = command.Caller.Sid,
             StartedAtUtc = nowUtc,
-            ExpiresAtUtc = nowUtc + command.Duration,
+            ExpiresAtUtc = AddUtcSaturating(nowUtc, command.Duration),
             AutoRenew = false,
             Status = LeaseStatus.Active,
             EpochId = now.EpochId,
@@ -805,9 +830,13 @@ public sealed class InhibitKernel
             return;
         }
 
-        if (tracked.Commit == LeaseCommitState.ReleasePending)
+        if (tracked.Commit != LeaseCommitState.Committed)
         {
-            Reject(command, $"Lease '{command.LeaseId}' is being released.");
+            Reject(
+                command,
+                tracked.Commit == LeaseCommitState.ReleasePending
+                    ? $"Lease '{command.LeaseId}' is being released."
+                    : $"A change to lease '{command.LeaseId}' is already being made durable.");
             return;
         }
 
@@ -823,14 +852,25 @@ public sealed class InhibitKernel
             return;
         }
 
+        if (command.Duration > MaximumLeaseDuration)
+        {
+            Reject(command, $"A renewal may not run for more than {MaximumLeaseDuration.TotalDays:0} days.");
+            return;
+        }
+
         if (!tracked.Deadline.IsInEpoch(now.EpochId))
         {
             Reject(command, "The lease has not been re-established on the current clock yet.");
             return;
         }
 
-        // Renew never shortens, so a renewal can only add protection and is applied at once.
+        var previousLease = tracked.Lease;
+        var previousDeadline = tracked.Deadline;
+
+        // Renew never shortens, so a renewal can only add protection and is applied at once. The previous
+        // state travels with the effect because storage may say this command already happened earlier.
         tracked.Deadline = tracked.Deadline.Renew(now, command.Duration);
+        tracked.Commit = LeaseCommitState.RenewPending;
 
         var nowUtc = _clock.UtcNow;
         var remaining = tracked.Deadline.RemainingAt(now);
@@ -838,7 +878,7 @@ public sealed class InhibitKernel
         {
             LastRenewedAtUtc = nowUtc,
             LastRenewDuration = command.Duration,
-            ExpiresAtUtc = nowUtc + remaining,
+            ExpiresAtUtc = AddUtcSaturating(nowUtc, remaining),
 
             // Raised when this renewal grants more than the lease has ever held, because the stored duration is
             // the ceiling a restored checkpoint is validated against. Leaving it at the first grant would make a
@@ -850,7 +890,13 @@ public sealed class InhibitKernel
             CheckpointUtc = nowUtc
         };
 
-        EmitLeaseEffect(EffectKind.PersistLease, command, tracked.Lease, LeaseCommandStatus.Renewed);
+        EmitLeaseEffect(
+            EffectKind.PersistLease,
+            command,
+            tracked.Lease,
+            LeaseCommandStatus.Renewed,
+            previousLease,
+            previousDeadline);
     }
 
     private void Release(LeaseCommand command, MonotonicStamp now)
@@ -861,6 +907,12 @@ public sealed class InhibitKernel
             return;
         }
 
+        if (tracked.Commit != LeaseCommitState.Committed)
+        {
+            Reject(command, $"A change to lease '{command.LeaseId}' is already being made durable.");
+            return;
+        }
+
         if (!MayChange(command.Caller, tracked))
         {
             Reject(command, "A lease may only be released by the account that created it, or an administrator.");
@@ -868,6 +920,8 @@ public sealed class InhibitKernel
         }
 
         var nowUtc = _clock.UtcNow;
+        var previousLease = tracked.Lease;
+        var previousDeadline = tracked.Deadline;
 
         // The inhibitor stays in place until the ending is durable. This is the one direction that reduces
         // protection, so it is the one that has to wait for the disk.
@@ -883,7 +937,13 @@ public sealed class InhibitKernel
             CheckpointUtc = nowUtc
         };
 
-        EmitLeaseEffect(EffectKind.PersistLeaseRelease, command, tracked.Lease, LeaseCommandStatus.Released);
+        EmitLeaseEffect(
+            EffectKind.PersistLeaseRelease,
+            command,
+            tracked.Lease,
+            LeaseCommandStatus.Released,
+            previousLease,
+            previousDeadline);
     }
 
     /// <summary>
@@ -903,7 +963,9 @@ public sealed class InhibitKernel
         EffectKind kind,
         LeaseCommand command,
         KeepAwakeLease lease,
-        LeaseCommandStatus success)
+        LeaseCommandStatus success,
+        KeepAwakeLease? previousLease = null,
+        LeaseDeadline? previousDeadline = null)
     {
         var effectId = ++_nextEffectId;
 
@@ -913,6 +975,15 @@ public sealed class InhibitKernel
             LeaseId = lease.Id,
             RequestId = command.RequestId,
             Success = success,
+            Purpose = success switch
+            {
+                LeaseCommandStatus.Created => LeaseEffectPurpose.Create,
+                LeaseCommandStatus.Renewed => LeaseEffectPurpose.Renew,
+                LeaseCommandStatus.Released => LeaseEffectPurpose.Release,
+                _ => LeaseEffectPurpose.Checkpoint
+            },
+            PreviousLease = previousLease,
+            PreviousDeadline = previousDeadline,
             IssuedAtRevision = _revision
         };
 
@@ -961,6 +1032,33 @@ public sealed class InhibitKernel
         {
             // Nobody is waiting on this one -- the kernel wrote it for itself, either to record a lease it
             // ended or to keep the stored remaining time current. Only whether it worked matters.
+            if (pending.Purpose == LeaseEffectPurpose.Expiry)
+            {
+                if (completion.Outcome == EffectOutcome.Succeeded)
+                {
+                    // This is the durability boundary. Only now may the inhibitor disappear.
+                    _leases.Remove(leaseId);
+                    _faults.Clear(PersistFaultKey(leaseId));
+                }
+                else
+                {
+                    if (tracked?.Commit == LeaseCommitState.ExpiryPending)
+                    {
+                        // Put it back in the retryable state. Its deadline remains expired, so the next Step
+                        // emits another ending write while the lease and this fault both keep holding.
+                        tracked.Commit = LeaseCommitState.Committed;
+                    }
+
+                    _faults.Report(
+                        PersistFaultKey(leaseId),
+                        FaultSeverity.Transient,
+                        $"Lease '{leaseId}' could not be marked expired: {completion.Error}",
+                        _clock.UtcNow);
+                }
+
+                return;
+            }
+
             if (completion.Outcome != EffectOutcome.Succeeded)
             {
                 _faults.Report(
@@ -989,7 +1087,7 @@ public sealed class InhibitKernel
                 break;
 
             case EffectOutcome.Succeeded:
-                if (tracked is not null)
+                if (tracked?.Commit is LeaseCommitState.Provisional or LeaseCommitState.RenewPending)
                 {
                     tracked.Commit = LeaseCommitState.Committed;
                 }
@@ -1011,7 +1109,11 @@ public sealed class InhibitKernel
                 // for that goes on holding the machine awake while expiry deliberately skips it -- so the one
                 // request whose whole purpose is to let the machine sleep would pin it awake instead. Retrying
                 // is exactly what the idempotency record exists to make safe, so this is reachable by design.
-                if (tracked?.Commit is LeaseCommitState.Provisional or LeaseCommitState.ReleasePending)
+                if (pending.Purpose == LeaseEffectPurpose.Renew)
+                {
+                    RestorePreviousLease(tracked, pending);
+                }
+                else if (tracked?.Commit is LeaseCommitState.Provisional or LeaseCommitState.ReleasePending)
                 {
                     _leases.Remove(leaseId);
                     _faults.Clear(PersistFaultKey(leaseId));
@@ -1022,7 +1124,11 @@ public sealed class InhibitKernel
                 break;
 
             case EffectOutcome.Conflict:
-                if (tracked?.Commit == LeaseCommitState.Provisional)
+                if (pending.Purpose is LeaseEffectPurpose.Renew or LeaseEffectPurpose.Release)
+                {
+                    RestorePreviousLease(tracked, pending);
+                }
+                else if (tracked?.Commit == LeaseCommitState.Provisional)
                 {
                     _leases.Remove(leaseId);
                 }
@@ -1048,10 +1154,15 @@ public sealed class InhibitKernel
         {
             // Protection must not be lifted on the strength of a write that failed. The lease goes back to
             // holding, and the failure is latched, which is itself another reason to stay awake.
-            if (tracked is not null)
+            RestorePreviousLease(tracked, pending);
+        }
+        else if (pending.Purpose == LeaseEffectPurpose.Renew)
+        {
+            // The extension took effect before the write because adding protection is safe. A failed write
+            // does not retract it; the fault records that memory and storage now disagree.
+            if (tracked?.Commit == LeaseCommitState.RenewPending)
             {
                 tracked.Commit = LeaseCommitState.Committed;
-                tracked.Lease = tracked.Lease with { Status = LeaseStatus.Active, EndedAtUtc = null, EndReason = null };
             }
         }
         else if (tracked?.Commit == LeaseCommitState.Provisional)
@@ -1078,6 +1189,53 @@ public sealed class InhibitKernel
     /// </summary>
     private static string PersistFaultKey(string leaseId) => $"lease-persist:{leaseId}";
 
+    private static string? ValidateStoredLease(KeepAwakeLease lease)
+    {
+        if (string.IsNullOrEmpty(lease.Id))
+        {
+            return "an active lease needs a non-empty identifier.";
+        }
+
+        if (!Enum.IsDefined(lease.Source))
+        {
+            return $"lease source '{lease.Source}' is not supported.";
+        }
+
+        if (lease.OriginalDuration <= TimeSpan.Zero)
+        {
+            return "original duration must be positive.";
+        }
+
+        if (lease.OriginalDuration > MaximumLeaseDuration)
+        {
+            return $"original duration exceeds the {MaximumLeaseDuration.TotalDays:0}-day maximum.";
+        }
+
+        return null;
+    }
+
+    private static string DisplayLeaseId(string? leaseId) =>
+        string.IsNullOrEmpty(leaseId) ? "(no identifier)" : leaseId;
+
+    private static DateTimeOffset AddUtcSaturating(DateTimeOffset nowUtc, TimeSpan duration)
+    {
+        var utc = nowUtc.ToUniversalTime();
+        var available = DateTimeOffset.MaxValue - utc;
+        return duration <= available ? utc.Add(duration) : DateTimeOffset.MaxValue;
+    }
+
+    private static void RestorePreviousLease(TrackedLease? tracked, PendingEffect pending)
+    {
+        if (tracked is null || pending.PreviousLease is null || pending.PreviousDeadline is null)
+        {
+            return;
+        }
+
+        tracked.Lease = pending.PreviousLease;
+        tracked.Deadline = pending.PreviousDeadline;
+        tracked.Commit = LeaseCommitState.Committed;
+    }
+
     private void Reject(LeaseCommand command, string reason) =>
         _pendingResults.Add(new LeaseCommandResult(
             command.RequestId, LeaseCommandStatus.Rejected, command.LeaseId, Error: reason));
@@ -1090,12 +1248,13 @@ public sealed class InhibitKernel
     /// that a lease ended means a row left saying "active" and that lease coming back on the next restart.
     /// </para>
     /// </summary>
-    private void Emit(KernelEffect effect)
+    private void Emit(KernelEffect effect, LeaseEffectPurpose purpose = LeaseEffectPurpose.Checkpoint)
     {
         _inFlight[effect.EffectId] = new PendingEffect
         {
             Kind = effect.Kind,
             LeaseId = effect.Lease?.Id,
+            Purpose = purpose,
             IssuedAtRevision = _revision
         };
 
@@ -1143,8 +1302,8 @@ public sealed class InhibitKernel
     /// <para>
     /// The host is supposed to report every effect exactly once. If it dies between issuing a write and
     /// reporting it, or is replaced, the entry would otherwise sit here for the lifetime of a process designed
-    /// to run for months. Dropping one is safe: an unconfirmed lease stays provisional and expires on its own
-    /// deadline, so protection is not affected either way.
+    /// to run for months. An abandoned expiry is returned to a retryable state and latches a fault because an
+    /// unknown write outcome is not enough evidence to reduce protection.
     /// </para>
     /// </summary>
     private void DropAbandonedEffects()
@@ -1160,7 +1319,23 @@ public sealed class InhibitKernel
             .Select(entry => entry.Key)
             .ToArray())
         {
-            _inFlight.Remove(effectId);
+            if (!_inFlight.Remove(effectId, out var abandoned)
+                || abandoned.Purpose != LeaseEffectPurpose.Expiry
+                || abandoned.LeaseId is not { } leaseId
+                || !_leases.TryGetValue(leaseId, out var tracked)
+                || tracked.Commit != LeaseCommitState.ExpiryPending)
+            {
+                continue;
+            }
+
+            // An unknown write outcome cannot authorize release. Return the lease to the retryable state and
+            // latch a fault; its expired deadline causes another ending write on the next evaluation.
+            tracked.Commit = LeaseCommitState.Committed;
+            _faults.Report(
+                PersistFaultKey(leaseId),
+                FaultSeverity.Transient,
+                $"The write marking lease '{leaseId}' expired was never reported back.",
+                _clock.UtcNow);
         }
     }
 
@@ -1245,7 +1420,18 @@ public sealed class InhibitKernel
     {
         Provisional,
         Committed,
-        ReleasePending
+        RenewPending,
+        ReleasePending,
+        ExpiryPending
+    }
+
+    private enum LeaseEffectPurpose
+    {
+        Checkpoint,
+        Create,
+        Renew,
+        Release,
+        Expiry
     }
 
     private sealed class TrackedLease
@@ -1273,6 +1459,12 @@ public sealed class InhibitKernel
         public string? RequestId { get; init; }
 
         public LeaseCommandStatus Success { get; init; }
+
+        public LeaseEffectPurpose Purpose { get; init; }
+
+        public KeepAwakeLease? PreviousLease { get; init; }
+
+        public LeaseDeadline? PreviousDeadline { get; init; }
 
         /// <summary>The revision that issued this, so an effect nobody ever reports back can be dropped.</summary>
         public long IssuedAtRevision { get; init; }
