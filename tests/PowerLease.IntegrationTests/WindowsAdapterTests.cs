@@ -1,3 +1,5 @@
+using System.Net;
+using System.Net.Sockets;
 using System.Runtime.InteropServices;
 using PowerLease.Application.Inhibitors;
 using PowerLease.Application.Kernel;
@@ -111,6 +113,35 @@ public sealed class WindowsAdapterTests
     }
 
     [Fact]
+    public void A_released_request_can_be_reestablished_under_a_new_generation()
+    {
+        var native = new RecordingPowerRequestNativeMethods();
+        var manager = new PowerRequestManager(native);
+
+        try
+        {
+            Assert.Equal(PowerInhibitResult.Held, manager.Acquire(generation: 10));
+            manager.Close(generation: 10);
+
+            var first = Assert.Single(native.Handles);
+            Assert.Equal(1, first.CloseCount);
+            Assert.Single(native.ClearRequests);
+
+            Assert.Equal(PowerInhibitResult.Held, manager.Acquire(generation: 11));
+            Assert.Equal(2, native.Handles.Count);
+            Assert.Equal(2, native.SetRequests.Count);
+        }
+        finally
+        {
+            manager.Close(generation: 10);
+            manager.Close(generation: 11);
+        }
+
+        Assert.Equal(2, native.ClearRequests.Count);
+        Assert.All(native.Handles, handle => Assert.Equal(1, handle.CloseCount));
+    }
+
+    [Fact]
     public void The_power_configuration_is_read_as_facts_or_admitted_gaps_never_as_a_silent_no()
     {
         // "The power plan forbids this" and "nobody could find out" call for different actions from the user,
@@ -130,6 +161,25 @@ public sealed class WindowsAdapterTests
         Assert.Single(snapshot.Unavailable, detail => detail.Contains("GetPwrCapabilities", StringComparison.Ordinal));
         Assert.Single(snapshot.Unavailable, detail => detail.Contains("GetSystemPowerStatus", StringComparison.Ordinal));
         Assert.Equal(1, native.LocalFreeCalls);
+    }
+
+    [Fact]
+    public void The_real_systemrequired_probe_returns_each_fact_or_names_why_it_is_unknown()
+    {
+        var snapshot = new PowerCapabilityProbe().Read();
+
+        AssertFactOrUnavailable(
+            snapshot.SystemRequiredHonouredOnMains,
+            snapshot.Unavailable,
+            "PowerReadACValue",
+            "PowerGetActiveScheme");
+        AssertFactOrUnavailable(
+            snapshot.SystemRequiredHonouredOnBattery,
+            snapshot.Unavailable,
+            "PowerReadDCValue",
+            "PowerGetActiveScheme");
+        AssertFactOrUnavailable(snapshot.ModernStandby, snapshot.Unavailable, "GetPwrCapabilities");
+        AssertFactOrUnavailable(snapshot.RunningOnBattery, snapshot.Unavailable, "GetSystemPowerStatus");
     }
 
     [Fact]
@@ -195,6 +245,66 @@ public sealed class WindowsAdapterTests
     }
 
     [Fact]
+    public async Task The_connection_table_finds_ipv4_ipv6_and_ipv4_mapped_connections_with_their_owner()
+    {
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var ipv4Listener = new TcpListener(IPAddress.Loopback, 0);
+        var ipv6Listener = new TcpListener(IPAddress.IPv6Loopback, 0);
+        var mappedListener = new TcpListener(IPAddress.IPv6Any, 0);
+        TcpClient? ipv4Server = null;
+        TcpClient? ipv6Server = null;
+        TcpClient? mappedServer = null;
+
+        try
+        {
+            ipv4Listener.Start();
+            ipv6Listener.Start();
+            mappedListener.Server.DualMode = true;
+            mappedListener.Start();
+
+            using var ipv4Client = new TcpClient(AddressFamily.InterNetwork);
+            var acceptIpv4 = ipv4Listener.AcceptTcpClientAsync(cancellationToken);
+            await ipv4Client.ConnectAsync(
+                IPAddress.Loopback,
+                ((IPEndPoint)ipv4Listener.LocalEndpoint).Port,
+                cancellationToken);
+            ipv4Server = await acceptIpv4;
+
+            using var ipv6Client = new TcpClient(AddressFamily.InterNetworkV6);
+            var acceptIpv6 = ipv6Listener.AcceptTcpClientAsync(cancellationToken);
+            await ipv6Client.ConnectAsync(
+                IPAddress.IPv6Loopback,
+                ((IPEndPoint)ipv6Listener.LocalEndpoint).Port,
+                cancellationToken);
+            ipv6Server = await acceptIpv6;
+
+            using var mappedClient = new TcpClient(AddressFamily.InterNetwork);
+            var acceptMapped = mappedListener.AcceptTcpClientAsync(cancellationToken);
+            await mappedClient.ConnectAsync(
+                IPAddress.Loopback,
+                ((IPEndPoint)mappedListener.LocalEndpoint).Port,
+                cancellationToken);
+            mappedServer = await acceptMapped;
+
+            var snapshot = new ExtendedTcpTableProvider().GetEstablishedConnections();
+            Assert.True(snapshot.Succeeded, snapshot.Detail);
+
+            AssertOwnedConnection(snapshot, ipv4Listener, IPAddress.Loopback.ToString());
+            AssertOwnedConnection(snapshot, ipv6Listener, IPAddress.IPv6Loopback.ToString());
+            AssertOwnedConnection(snapshot, mappedListener, IPAddress.Loopback.ToString());
+        }
+        finally
+        {
+            ipv4Server?.Dispose();
+            ipv6Server?.Dispose();
+            mappedServer?.Dispose();
+            ipv4Listener.Stop();
+            ipv6Listener.Stop();
+            mappedListener.Stop();
+        }
+    }
+
+    [Fact]
     public void The_running_processes_are_listed_and_an_unreadable_command_line_is_null_not_blank()
     {
         // A service cannot read most other accounts' command lines. That is expected, and the evaluator treats
@@ -228,6 +338,30 @@ public sealed class WindowsAdapterTests
             Assert.Null(read.Bookmark);
             Assert.False(string.IsNullOrWhiteSpace(read.Detail));
         }
+    }
+
+    private static void AssertFactOrUnavailable(
+        bool? fact,
+        IReadOnlyList<string> unavailable,
+        params string[] expectedCalls)
+    {
+        Assert.True(
+            fact.HasValue
+            || unavailable.Any(detail => expectedCalls.Any(
+                call => detail.Contains(call, StringComparison.Ordinal))),
+            $"No fact and no diagnostic naming any of: {string.Join(", ", expectedCalls)}");
+    }
+
+    private static void AssertOwnedConnection(TcpSnapshot snapshot, TcpListener listener, string remoteAddress)
+    {
+        var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        var connection = Assert.Single(
+            snapshot.Connections,
+            item => item.LocalPort == port && item.OwningProcessId == Environment.ProcessId);
+
+        Assert.Equal(remoteAddress, connection.RemoteAddress);
+        Assert.Equal(Environment.ProcessId, connection.OwningProcessId);
+        Assert.DoesNotContain("::ffff:", connection.RemoteAddress, StringComparison.OrdinalIgnoreCase);
     }
 
     private sealed class RecordingPowerRequestNativeMethods : IPowerRequestNativeMethods

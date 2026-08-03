@@ -108,6 +108,139 @@ public sealed class ServiceHostTests
     }
 
     [Fact]
+    public async Task Every_declared_method_has_the_access_promised_by_the_contract()
+    {
+        var router = Router([Lease("mine", Caller().Sid)], _ => { });
+        var administratorOnly = 0;
+
+        foreach (var method in IpcMethods.All)
+        {
+            Assert.True(IpcMethods.TryGetRequiredAccess(method, out var required));
+
+            var ordinary = await router.HandleAsync(
+                RequestFor(method),
+                Caller(),
+                TestContext.Current.CancellationToken);
+            var administrator = await router.HandleAsync(
+                RequestFor(method),
+                Caller(isAdministrator: true),
+                TestContext.Current.CancellationToken);
+
+            if (required == IpcAccessLevel.Administrator)
+            {
+                administratorOnly++;
+                Assert.False(ordinary.Accepted);
+                Assert.Contains("not allowed", ordinary.Error!, StringComparison.OrdinalIgnoreCase);
+            }
+            else
+            {
+                Assert.DoesNotContain("not allowed", ordinary.Error ?? string.Empty, StringComparison.OrdinalIgnoreCase);
+            }
+
+            // Some declared methods intentionally have no handler in this build. Reaching "not available" is
+            // still proof that authorization admitted the administrator instead of hiding the handler decision.
+            Assert.DoesNotContain(
+                "not allowed",
+                administrator.Error ?? string.Empty,
+                StringComparison.OrdinalIgnoreCase);
+        }
+
+        Assert.True(administratorOnly > 0, "The matrix must prove that administrators actually get more access.");
+    }
+
+    [Fact]
+    public async Task A_status_flood_is_limited_per_caller_but_release_is_never_limited()
+    {
+        var clock = new FakeClock();
+        var router = new IpcRequestRouter(
+            () => KernelSnapshot.Initial,
+            () => new LeaseLoadResult([Lease("mine", Caller().Sid)], []),
+            () => new PowerCapabilitySnapshot(null, null, null, null, []),
+            (command, _) => Task.FromResult(
+                new LeaseCommandResult(command.RequestId, LeaseCommandStatus.Released, command.LeaseId)),
+            clock);
+
+        for (var count = 0; count < IpcRequestRouter.MaximumRequestsPerWindow; count++)
+        {
+            var allowed = await router.HandleAsync(
+                RequestFor(IpcMethods.GetStatus),
+                Caller(),
+                TestContext.Current.CancellationToken);
+            Assert.True(allowed.Accepted, allowed.Error);
+        }
+
+        var refused = await router.HandleAsync(
+            RequestFor(IpcMethods.GetStatus),
+            Caller(),
+            TestContext.Current.CancellationToken);
+        var otherCaller = await router.HandleAsync(
+            RequestFor(IpcMethods.GetStatus),
+            Caller(sid: "S-1-5-21-2000"),
+            TestContext.Current.CancellationToken);
+        var release = await router.HandleAsync(
+            ReleaseRequest(leaseId: null),
+            Caller(),
+            TestContext.Current.CancellationToken);
+
+        Assert.False(refused.Accepted);
+        Assert.Contains("too often", refused.Error!, StringComparison.OrdinalIgnoreCase);
+        Assert.True(otherCaller.Accepted, otherCaller.Error);
+        Assert.True(release.Accepted, release.Error);
+
+        clock.Advance(TimeSpan.FromMinutes(1));
+        var afterWindow = await router.HandleAsync(
+            RequestFor(IpcMethods.GetStatus),
+            Caller(),
+            TestContext.Current.CancellationToken);
+        Assert.True(afterWindow.Accepted, afterWindow.Error);
+    }
+
+    [Fact]
+    public void A_missing_ssh_log_under_default_configuration_keeps_the_kernel_protected()
+    {
+        // The platform reader's NotInstalled result is supplied directly because CI machines are allowed to
+        // have OpenSSH installed. Everything after that OS-dependent branch is real: defaults, correlation,
+        // aggregation and the power coordinator.
+        var config = new PowerLeaseConfig();
+        Assert.False(config.Ssh.TcpOnlyConfirmed);
+
+        var clock = new FakeClock();
+        var correlator = new SshSessionCorrelator(new SshDetectionOptions
+        {
+            Ports = config.Ssh.Ports,
+            MinimumConnectionAge = TimeSpan.FromSeconds(config.Ssh.MinimumConnectionSeconds),
+            HoldDuration = TimeSpan.FromMinutes(config.Ssh.DefaultHoldMinutes),
+            TcpOnlyConfirmed = config.Ssh.TcpOnlyConfirmed
+        });
+        var read = SshLogRead.Unavailable(SshLogChannelState.NotInstalled, "the channel is absent");
+        var correlation = correlator.Evaluate(TcpSnapshot.Of(), read, clock.Now, clock.UtcNow);
+        var kernel = new InhibitKernel(
+            new KernelOptions
+            {
+                ExpectedSources = [SshSessionCorrelator.SourceId],
+                CoveredKinds = [InhibitorKind.SshSession],
+                StartupGracePeriod = TimeSpan.Zero
+            },
+            new PowerInhibitCoordinator(new NoOpInhibitor()),
+            clock);
+        var stamp = new SourceStamp(SshSessionCorrelator.SourceId, 1, 1, clock.Now, ConfigGeneration: 0);
+
+        Assert.Equal(SshLogChannelState.NotInstalled, correlation.LogState);
+        Assert.False(correlation.Report.IsDeterminate);
+        Assert.Equal(
+            ObservationDisposition.Accepted,
+            kernel.Apply(new SourceObservation(stamp, correlation.Report)));
+
+        var step = kernel.Step();
+        Assert.True(step.Snapshot.ShouldHold);
+        Assert.Equal(ProtectionState.Protected, step.Snapshot.ProtectionState);
+        var inhibitor = Assert.Single(
+            step.Snapshot.Decision.Inhibitors,
+            item => item.Kind == InhibitorKind.ProducerUnhealthy);
+        Assert.Contains("OpenSSH log", inhibitor.Reason, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task A_bare_release_resolves_the_callers_only_active_hold()
     {
         LeaseCommand? dispatched = null;
@@ -208,6 +341,22 @@ public sealed class ServiceHostTests
             IpcMethods.ReleaseLease,
             JsonSerializer.Serialize(new ReleaseLeasePayload(leaseId), Json));
 
+    private static RequestEnvelope RequestFor(string method) => method switch
+    {
+        IpcMethods.CreateLease => new RequestEnvelope(
+            IpcProtocol.Version,
+            Guid.NewGuid(),
+            method,
+            JsonSerializer.Serialize(new CreateLeasePayload(TimeSpan.FromHours(1), "integration test"), Json)),
+        IpcMethods.RenewLease => new RequestEnvelope(
+            IpcProtocol.Version,
+            Guid.NewGuid(),
+            method,
+            JsonSerializer.Serialize(new RenewLeasePayload("mine", TimeSpan.FromHours(1)), Json)),
+        IpcMethods.ReleaseLease => ReleaseRequest("mine"),
+        _ => new RequestEnvelope(IpcProtocol.Version, Guid.NewGuid(), method)
+    };
+
     private static KeepAwakeLease Lease(string id, string ownerSid) => new()
     {
         Id = id,
@@ -220,14 +369,16 @@ public sealed class ServiceHostTests
         OriginalDuration = TimeSpan.FromHours(1)
     };
 
-    private static CallerSnapshot Caller() => new()
-    {
-        Sid = "S-1-5-21-1000",
-        AccountName = "POWERLEASE\\developer",
-        IsAdministrator = false,
-        IsElevated = false
-    };
-
+    private static CallerSnapshot Caller(
+        string sid = "S-1-5-21-1000",
+        bool isAdministrator = false) =>
+        new()
+        {
+            Sid = sid,
+            AccountName = "POWERLEASE\\developer",
+            IsAdministrator = isAdministrator,
+            IsElevated = isAdministrator
+        };
     private static string SourceId(Type? implementationType) => implementationType switch
     {
         { } type when type == typeof(SshProducerWorker) => SshSessionCorrelator.SourceId,
@@ -326,11 +477,17 @@ public sealed class ServiceHostTests
     {
         private static readonly Guid Epoch = new("9497ea39-5ac8-4922-8ce2-79d9440035ba");
 
-        public DateTimeOffset UtcNow { get; } = new(2026, 8, 3, 0, 0, 0, TimeSpan.Zero);
+        public DateTimeOffset UtcNow { get; private set; } = new(2026, 8, 3, 0, 0, 0, TimeSpan.Zero);
 
         public MonotonicStamp Now { get; private set; } = new(Epoch, TimeSpan.FromMinutes(1));
 
         public int NewEpochs { get; private set; }
+
+        public void Advance(TimeSpan elapsed)
+        {
+            UtcNow = UtcNow.Add(elapsed);
+            Now = new MonotonicStamp(Now.EpochId, Now.Elapsed + elapsed);
+        }
 
         /// <summary>
         /// Counted as well as applied, so a test can show the host really does start a new epoch on resume --

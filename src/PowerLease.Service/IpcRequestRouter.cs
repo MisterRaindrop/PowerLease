@@ -11,7 +11,12 @@ namespace PowerLease.Service;
 
 internal sealed class IpcRequestRouter
 {
+    // Two requests a second, sustained for a whole minute, is far beyond interactive use and generous for a
+    // monitoring script, while still putting a firm ceiling on one authenticated account flooding the service.
+    internal const int MaximumRequestsPerWindow = 120;
+
     private static readonly TimeSpan CommandQueueTimeout = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan RateLimitWindow = TimeSpan.FromMinutes(1);
 
     // A week covers plausible interactive work and matches the longest configured SSH hold, without allowing a
     // malformed request to overflow deadline arithmetic deeper in the kernel.
@@ -26,6 +31,8 @@ internal sealed class IpcRequestRouter
     private readonly Func<PowerCapabilitySnapshot> _wakeStatus;
     private readonly Func<LeaseCommand, CancellationToken, Task<LeaseCommandResult>> _dispatch;
     private readonly IClock _clock;
+    private readonly object _rateLimitSync = new();
+    private readonly Dictionary<string, CallerRateWindow> _rateWindows = new(StringComparer.Ordinal);
 
     public IpcRequestRouter(
         PowerLease.Application.Hosting.KernelLoop loop,
@@ -70,6 +77,22 @@ internal sealed class IpcRequestRouter
         ArgumentNullException.ThrowIfNull(request);
         ArgumentNullException.ThrowIfNull(caller);
 
+        // Releasing gets its own allowance rather than an exemption. A status-polling script must never use up
+        // the quota that lets its caller end a hold -- but an exempt method is an unbounded one, and every
+        // release reaching the kernel becomes a queued command on the single loop that decides whether this
+        // machine stays awake. Two separate windows keep both properties: neither can starve the other, and
+        // neither is unbounded. The choice of window depends on the protocol version being the one we
+        // understand, so a bogus envelope cannot pick its bucket by writing ReleaseLease in the method field.
+        var releasing = request.ProtocolVersion == IpcProtocol.Version
+            && request.Method == IpcMethods.ReleaseLease;
+
+        if (IsRateLimited(caller, releasing))
+        {
+            return ResponseEnvelope.Refused(
+                request.RequestId,
+                "The caller is asking too often; wait a minute and try again.");
+        }
+
         if (request.ProtocolVersion != IpcProtocol.Version)
         {
             return ResponseEnvelope.Refused(
@@ -110,6 +133,58 @@ internal sealed class IpcRequestRouter
         };
     }
 
+    /// <param name="releasing">
+    /// Whether this request ends a hold. Releases are counted in their own window, so however hard a caller
+    /// polls for status it still has its full allowance left for the one request that gives a machine back.
+    /// </param>
+    private bool IsRateLimited(CallerSnapshot caller, bool releasing)
+    {
+        var key = releasing ? "release:" + caller.Sid : "request:" + caller.Sid;
+        var now = _clock.Now;
+
+        lock (_rateLimitSync)
+        {
+            if (!_rateWindows.TryGetValue(key, out var window)
+                || window.Start.EpochId != now.EpochId
+                || now.Elapsed < window.Start.Elapsed
+                || now.Elapsed - window.Start.Elapsed >= RateLimitWindow)
+            {
+                _rateWindows[key] = new CallerRateWindow(now, requestCount: 1);
+                RemoveExpiredRateWindows(now, key);
+                return false;
+            }
+
+            if (window.RequestCount >= MaximumRequestsPerWindow)
+            {
+                return true;
+            }
+
+            window.RequestCount++;
+            return false;
+        }
+    }
+
+    private void RemoveExpiredRateWindows(MonotonicStamp now, string currentKey)
+    {
+        // A Windows machine normally has very few authenticated callers. Pruning only after the map grows past
+        // that ordinary range keeps departed domain identities from accumulating for the life of the service.
+        if (_rateWindows.Count < 128)
+        {
+            return;
+        }
+
+        foreach (var (sid, window) in _rateWindows.ToArray())
+        {
+            if (!string.Equals(sid, currentKey, StringComparison.Ordinal)
+                && (window.Start.EpochId != now.EpochId
+                    || now.Elapsed < window.Start.Elapsed
+                    || now.Elapsed - window.Start.Elapsed >= RateLimitWindow))
+            {
+                _rateWindows.Remove(sid);
+            }
+        }
+    }
+
     private async Task<ResponseEnvelope> HandleCommandAsync(
         RequestEnvelope request,
         CallerSnapshot caller,
@@ -143,6 +218,11 @@ internal sealed class IpcRequestRouter
         };
 
         var result = await _dispatch(command, cancellationToken).ConfigureAwait(false);
+
+        // Every outcome the kernel produces, including a refusal, travels as an accepted envelope carrying a
+        // CommandResponse. The client turns a non-null Error into the same "refused" exit code either way, so
+        // singling out one rejection by matching words in its message bought nothing and would have changed
+        // behaviour silently the day somebody reworded it.
         return Accepted(
             request.RequestId,
             new CommandResponse(result.Status.ToString(), result.LeaseId, result.Error));
@@ -340,6 +420,13 @@ internal sealed class IpcRequestRouter
         {
             return store.LoadLeases(LeaseStatus.Active);
         }
+    }
+
+    private sealed class CallerRateWindow(MonotonicStamp start, int requestCount)
+    {
+        public MonotonicStamp Start { get; } = start;
+
+        public int RequestCount { get; set; } = requestCount;
     }
 
 }
