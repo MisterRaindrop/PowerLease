@@ -38,11 +38,6 @@ public static class SqliteSchema
             source                          TEXT NOT NULL,
             reason                          TEXT,
             owner_user                      TEXT,
-
-            -- Who may renew or release this lease after a restart. Stored rather than resolved from
-            -- owner_user on the way back in, because that resolution can quietly land on a different
-            -- account. Null means unknown, which the kernel treats as administrator-only.
-            owner_sid                       TEXT,
             remote_ip                       TEXT,
             process_id                      INTEGER,
             process_name                    TEXT,
@@ -294,4 +289,11 @@ public static class SqliteSchema
             PRIMARY KEY (caller_sid, request_id)
         );
         """;
+
+    /// <summary>
+    /// Persist the security identifier that authorizes renew and release after a restart. Version 1 shipped
+    /// without it, so changing the original schema text would strand existing databases at a version that
+    /// falsely appeared current.
+    /// </summary>
+    public const string Version2 = "ALTER TABLE keep_awake_leases ADD COLUMN owner_sid TEXT;";
 }

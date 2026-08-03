@@ -52,10 +52,13 @@ public sealed class KernelResumeAndEvidenceTests
         harness.ConfirmAbsent("ssh");
         var result = harness.Step();
 
-        Assert.DoesNotContain(
-            result.Snapshot.Decision.Inhibitors,
-            inhibitor => inhibitor.Kind == InhibitorKind.CliLease);
-        Assert.False(result.Snapshot.ShouldHold);
+        var ending = Assert.Single(result.Effects, candidate => candidate.Kind == EffectKind.PersistLease);
+        Assert.Equal(LeaseStatus.Expired, ending.Lease!.Status);
+        Assert.True(result.Snapshot.ShouldHold);
+
+        harness.Kernel.Apply(new EffectFinished(new EffectCompletion(ending.EffectId, EffectOutcome.Succeeded)));
+        harness.ConfirmAbsent("ssh");
+        Assert.False(harness.Step().Snapshot.ShouldHold);
     }
 
     [Fact]
@@ -76,7 +79,13 @@ public sealed class KernelResumeAndEvidenceTests
         // Four minutes were left. After five it must be gone, grace period aside.
         harness.Clock.Advance(harness.Options.ResumeGracePeriod + TimeSpan.FromMinutes(5));
         harness.ConfirmAbsent("ssh");
+        var result = harness.Step();
 
+        var ending = Assert.Single(result.Effects, candidate => candidate.Kind == EffectKind.PersistLease);
+        Assert.Equal(LeaseStatus.Expired, ending.Lease!.Status);
+
+        harness.Kernel.Apply(new EffectFinished(new EffectCompletion(ending.EffectId, EffectOutcome.Succeeded)));
+        harness.ConfirmAbsent("ssh");
         Assert.False(harness.Step().Snapshot.ShouldHold);
     }
 
@@ -117,17 +126,16 @@ public sealed class KernelResumeAndEvidenceTests
     [Fact]
     public void A_lease_running_out_is_recorded_so_a_restart_cannot_bring_it_back()
     {
-        // Protection is already gone when a lease expires, so unlike a release there is no ordering to respect.
-        // It still has to be written: a row left saying "active" with time on it would be granted that time again
-        // by the restore path, and a three-hour hold that ran out weeks ago would come back for three more hours
-        // on every restart.
+        // A row left saying "active" with time on it would be granted that time again by the restore path. The
+        // ending therefore has to become durable before the lease stops protecting this process too.
         var harness = WithLease(TimeSpan.FromMinutes(10));
 
         harness.Clock.Advance(TimeSpan.FromMinutes(11));
         harness.ConfirmAbsent("ssh");
         var result = harness.Step();
 
-        Assert.False(result.Snapshot.ShouldHold);
+        Assert.True(result.Snapshot.ShouldHold);
+        Assert.Contains(result.Snapshot.Decision.Inhibitors, inhibitor => inhibitor.Kind == InhibitorKind.CliLease);
         var recorded = Assert.Single(result.Effects, candidate => candidate.Kind == EffectKind.PersistLease);
         Assert.Equal(LeaseStatus.Expired, recorded.Lease!.Status);
         Assert.NotNull(recorded.Lease.EndedAtUtc);
@@ -256,6 +264,16 @@ public sealed class KernelResumeAndEvidenceTests
             fault => fault.Key.StartsWith("lease-persist:", StringComparison.Ordinal));
         Assert.True(failed.Snapshot.ShouldHold);
         Assert.Empty(failed.CompletedCommands);
+
+        // The expired deadline makes the failed ending retryable, so the fault has a real success path that
+        // clears it instead of pinning the machine awake forever.
+        var retry = Assert.Single(failed.Effects, candidate => candidate.Kind == EffectKind.PersistLease);
+        harness.Kernel.Apply(new EffectFinished(new EffectCompletion(retry.EffectId, EffectOutcome.Succeeded)));
+        harness.ConfirmAbsent("ssh");
+        var recovered = harness.Step();
+
+        Assert.Empty(recovered.Snapshot.Faults);
+        Assert.False(recovered.Snapshot.ShouldHold);
     }
 
     [Fact]
@@ -299,10 +317,11 @@ public sealed class KernelResumeAndEvidenceTests
     }
 
     [Fact]
-    public void An_effect_that_is_never_reported_back_does_not_hold_the_machine_awake_for_ever()
+    public void An_unreported_expiry_write_keeps_holding_until_the_ending_is_confirmed()
     {
-        // A lease is provisional until its write is confirmed. If the host dies between emitting the effect and
-        // reporting it, nothing ever confirms or fails it, and the provisional lease holds indefinitely.
+        // The original creation outcome is unknown, so storage may contain an active lease. Letting the in-memory
+        // inhibitor disappear merely because its expiry write is also unreported would reduce protection without
+        // a durable ending.
         var harness = new KernelHarness();
         harness.ConfirmAbsent("ssh");
         harness.Kernel.Execute(Create(harness, TimeSpan.FromMinutes(10)));
@@ -312,6 +331,13 @@ public sealed class KernelResumeAndEvidenceTests
         harness.Clock.Advance(TimeSpan.FromHours(2));
         harness.ConfirmAbsent("ssh");
 
+        var pending = harness.Step();
+        Assert.True(pending.Snapshot.ShouldHold);
+        var ending = Assert.Single(pending.Effects, candidate => candidate.Kind == EffectKind.PersistLease);
+        Assert.Equal(LeaseStatus.Expired, ending.Lease!.Status);
+
+        harness.Kernel.Apply(new EffectFinished(new EffectCompletion(ending.EffectId, EffectOutcome.Succeeded)));
+        harness.ConfirmAbsent("ssh");
         Assert.False(harness.Step().Snapshot.ShouldHold);
     }
 }
