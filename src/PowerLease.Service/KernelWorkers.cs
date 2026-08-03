@@ -145,18 +145,22 @@ internal sealed class LifecycleWorker : IHostedService
 
     private readonly KernelLoop _loop;
     private readonly PowerEventRelay _events;
+    private readonly IClock _clock;
     private readonly ILogger<LifecycleWorker> _logger;
 
     public LifecycleWorker(
         KernelLoop loop,
         PowerEventRelay events,
+        IClock clock,
         ILogger<LifecycleWorker> logger)
     {
         ArgumentNullException.ThrowIfNull(loop);
         ArgumentNullException.ThrowIfNull(events);
+        ArgumentNullException.ThrowIfNull(clock);
         ArgumentNullException.ThrowIfNull(logger);
         _loop = loop;
         _events = events;
+        _clock = clock;
         _logger = logger;
     }
 
@@ -174,10 +178,20 @@ internal sealed class LifecycleWorker : IHostedService
 
     private void OnPowerEvent(object? sender, PowerLeasePowerEventArgs eventArgs)
     {
-        LogPowerEvent(_logger, eventArgs.PowerEvent.ToString(), null);
+        // The clock and the message come first, and logging afterwards. Windows delivers this on its service
+        // control thread, and the file logger writes synchronously -- so logging first would let a slow or full
+        // disk delay the only notification that re-establishes protection after a resume.
         if (eventArgs.PowerEvent == PowerLeasePowerEvent.Resumed)
         {
+            // Before the message, never after. Every elapsed value measured before the machine slept belongs to
+            // an origin that is now meaningless, and the kernel decides a lease's remaining time by comparing
+            // against this epoch. Posting first would let one evaluation run against the old origin -- which,
+            // because the Windows performance counter keeps counting through sleep, reads as though the whole
+            // outage came out of the lease.
+            _clock.BeginNewEpoch();
             _loop.Post(new ResumedFromSleep("Windows reported that the machine resumed"));
         }
+
+        LogPowerEvent(_logger, eventArgs.PowerEvent.ToString(), null);
     }
 }
