@@ -160,6 +160,29 @@ public sealed class KernelRestartTests
     }
 
     [Fact]
+    public void A_restored_lease_reports_an_expiry_that_has_not_already_passed()
+    {
+        // `powerlease list` works out the time remaining from ExpiresAtUtc. It was written before the service
+        // went down, so for any outage longer than the lease it is in the past -- and the hold that is really
+        // running for another two hours would be shown as "0m left".
+        var harness = new KernelHarness();
+        var storedExpiry = new DateTimeOffset(2026, 7, 31, 11, 0, 0, TimeSpan.Zero);
+        harness.Clock.UtcNow = storedExpiry.AddDays(1);
+
+        harness.Kernel.Restore(
+        [
+            Stored(original: TimeSpan.FromHours(3), remaining: TimeSpan.FromHours(2)) with
+            {
+                ExpiresAtUtc = storedExpiry
+            }
+        ]);
+        harness.ConfirmAbsent("ssh");
+
+        var effect = Assert.Single(harness.Step().Effects, e => e.Kind == EffectKind.PersistLease);
+        Assert.Equal(harness.Clock.UtcNow.AddHours(2), effect.Lease!.ExpiresAtUtc);
+    }
+
+    [Fact]
     public void A_lease_that_had_already_ended_is_not_brought_back()
     {
         var harness = new KernelHarness();
