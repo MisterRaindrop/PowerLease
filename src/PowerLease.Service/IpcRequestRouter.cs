@@ -11,7 +11,12 @@ namespace PowerLease.Service;
 
 internal sealed class IpcRequestRouter
 {
+    // Two requests a second, sustained for a whole minute, is far beyond interactive use and generous for a
+    // monitoring script, while still putting a firm ceiling on one authenticated account flooding the service.
+    internal const int MaximumRequestsPerWindow = 120;
+
     private static readonly TimeSpan CommandQueueTimeout = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan RateLimitWindow = TimeSpan.FromMinutes(1);
 
     // A week covers plausible interactive work and matches the longest configured SSH hold, without allowing a
     // malformed request to overflow deadline arithmetic deeper in the kernel.
@@ -26,6 +31,8 @@ internal sealed class IpcRequestRouter
     private readonly Func<PowerCapabilitySnapshot> _wakeStatus;
     private readonly Func<LeaseCommand, CancellationToken, Task<LeaseCommandResult>> _dispatch;
     private readonly IClock _clock;
+    private readonly object _rateLimitSync = new();
+    private readonly Dictionary<string, CallerRateWindow> _rateWindows = new(StringComparer.Ordinal);
 
     public IpcRequestRouter(
         PowerLease.Application.Hosting.KernelLoop loop,
@@ -70,6 +77,18 @@ internal sealed class IpcRequestRouter
         ArgumentNullException.ThrowIfNull(request);
         ArgumentNullException.ThrowIfNull(caller);
 
+        // Releasing protection is deliberately outside the quota. In particular, a status-polling script can
+        // exhaust its caller's allowance without ever preventing that caller from ending its own hold. The
+        // exemption applies only to this protocol version, so a bogus envelope cannot evade the quota merely
+        // by putting ReleaseLease in its method field.
+        if ((request.ProtocolVersion != IpcProtocol.Version || request.Method != IpcMethods.ReleaseLease)
+            && IsRateLimited(caller))
+        {
+            return ResponseEnvelope.Refused(
+                request.RequestId,
+                "The caller is asking too often; wait a minute and try again.");
+        }
+
         if (request.ProtocolVersion != IpcProtocol.Version)
         {
             return ResponseEnvelope.Refused(
@@ -110,6 +129,52 @@ internal sealed class IpcRequestRouter
         };
     }
 
+    private bool IsRateLimited(CallerSnapshot caller)
+    {
+        var now = _clock.Now;
+        lock (_rateLimitSync)
+        {
+            if (!_rateWindows.TryGetValue(caller.Sid, out var window)
+                || window.Start.EpochId != now.EpochId
+                || now.Elapsed < window.Start.Elapsed
+                || now.Elapsed - window.Start.Elapsed >= RateLimitWindow)
+            {
+                _rateWindows[caller.Sid] = new CallerRateWindow(now, requestCount: 1);
+                RemoveExpiredRateWindows(now, caller.Sid);
+                return false;
+            }
+
+            if (window.RequestCount >= MaximumRequestsPerWindow)
+            {
+                return true;
+            }
+
+            window.RequestCount++;
+            return false;
+        }
+    }
+
+    private void RemoveExpiredRateWindows(MonotonicStamp now, string currentSid)
+    {
+        // A Windows machine normally has very few authenticated callers. Pruning only after the map grows past
+        // that ordinary range keeps departed domain identities from accumulating for the life of the service.
+        if (_rateWindows.Count < 128)
+        {
+            return;
+        }
+
+        foreach (var (sid, window) in _rateWindows.ToArray())
+        {
+            if (!string.Equals(sid, currentSid, StringComparison.Ordinal)
+                && (window.Start.EpochId != now.EpochId
+                    || now.Elapsed < window.Start.Elapsed
+                    || now.Elapsed - window.Start.Elapsed >= RateLimitWindow))
+            {
+                _rateWindows.Remove(sid);
+            }
+        }
+    }
+
     private async Task<ResponseEnvelope> HandleCommandAsync(
         RequestEnvelope request,
         CallerSnapshot caller,
@@ -143,6 +208,12 @@ internal sealed class IpcRequestRouter
         };
 
         var result = await _dispatch(command, cancellationToken).ConfigureAwait(false);
+        if (result.Status == LeaseCommandStatus.Rejected
+            && result.Error?.Contains("request identifier", StringComparison.OrdinalIgnoreCase) == true)
+        {
+            return ResponseEnvelope.Refused(request.RequestId, result.Error);
+        }
+
         return Accepted(
             request.RequestId,
             new CommandResponse(result.Status.ToString(), result.LeaseId, result.Error));
@@ -340,6 +411,13 @@ internal sealed class IpcRequestRouter
         {
             return store.LoadLeases(LeaseStatus.Active);
         }
+    }
+
+    private sealed class CallerRateWindow(MonotonicStamp start, int requestCount)
+    {
+        public MonotonicStamp Start { get; } = start;
+
+        public int RequestCount { get; set; } = requestCount;
     }
 
 }

@@ -30,13 +30,21 @@ internal sealed class PipeServerWorker : BackgroundService
 
     private readonly IpcRequestRouter _router;
     private readonly ILogger<PipeServerWorker> _logger;
+    private readonly string _pipeName;
 
     public PipeServerWorker(IpcRequestRouter router, ILogger<PipeServerWorker> logger)
+        : this(router, logger, IpcProtocol.PipeName)
+    {
+    }
+
+    internal PipeServerWorker(IpcRequestRouter router, ILogger<PipeServerWorker> logger, string pipeName)
     {
         ArgumentNullException.ThrowIfNull(router);
         ArgumentNullException.ThrowIfNull(logger);
+        ArgumentException.ThrowIfNullOrWhiteSpace(pipeName);
         _router = router;
         _logger = logger;
+        _pipeName = pipeName;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -51,7 +59,7 @@ internal sealed class PipeServerWorker : BackgroundService
                 continue;
             }
 
-            var pipe = CreatePipe();
+            var pipe = CreatePipe(_pipeName);
             try
             {
                 await pipe.WaitForConnectionAsync(stoppingToken).ConfigureAwait(false);
@@ -112,7 +120,7 @@ internal sealed class PipeServerWorker : BackgroundService
         await WriteResponseAsync(pipe, response, cancellationToken).ConfigureAwait(false);
     }
 
-    private static NamedPipeServerStream CreatePipe()
+    private static NamedPipeServerStream CreatePipe(string pipeName)
     {
         var security = new PipeSecurity();
 
@@ -133,7 +141,7 @@ internal sealed class PipeServerWorker : BackgroundService
             AccessControlType.Allow));
 
         return NamedPipeServerStreamAcl.Create(
-            IpcProtocol.PipeName,
+            pipeName,
             PipeDirection.InOut,
             MaximumServerInstances,
             PipeTransmissionMode.Byte,
@@ -173,22 +181,35 @@ internal sealed class PipeServerWorker : BackgroundService
         NamedPipeServerStream pipe,
         CancellationToken cancellationToken)
     {
-        var prefix = new byte[sizeof(int)];
-        await pipe.ReadExactlyAsync(prefix, cancellationToken).ConfigureAwait(false);
-        var length = BinaryPrimitives.ReadInt32LittleEndian(prefix);
-        if (length <= 0 || length > IpcProtocol.MaxMessageBytes)
-        {
-            return null;
-        }
-
-        var payload = new byte[length];
-        await pipe.ReadExactlyAsync(payload, cancellationToken).ConfigureAwait(false);
         try
         {
-            return JsonSerializer.Deserialize<RequestEnvelope>(payload, Json);
+            var prefix = new byte[sizeof(int)];
+            await pipe.ReadExactlyAsync(prefix, cancellationToken).ConfigureAwait(false);
+            var length = BinaryPrimitives.ReadInt32LittleEndian(prefix);
+            if (length <= 0 || length > IpcProtocol.MaxMessageBytes)
+            {
+                return null;
+            }
+
+            var payload = new byte[length];
+            await pipe.ReadExactlyAsync(payload, cancellationToken).ConfigureAwait(false);
+            try
+            {
+                return JsonSerializer.Deserialize<RequestEnvelope>(payload, Json);
+            }
+            catch (JsonException)
+            {
+                return null;
+            }
         }
-        catch (JsonException)
+        catch (EndOfStreamException)
         {
+            // A partial prefix or payload is malformed, not a reason to let this connection stop the endpoint.
+            return null;
+        }
+        catch (IOException)
+        {
+            // Windows may report a client disconnect as a broken pipe instead of end-of-stream.
             return null;
         }
     }

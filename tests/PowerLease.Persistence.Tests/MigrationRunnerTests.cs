@@ -201,7 +201,15 @@ public sealed class MigrationRunnerTests
 
         var backup = Path.Combine(root.Path, "backup.db");
         DatabaseBackup.CopyTo(connection, backup);
-        Assert.Equal(1, SqliteTestHelpers.CountIn(backup, "alerts"));
+
+        var restoredPath = Path.Combine(root.Path, "restored.db");
+        File.Copy(backup, restoredPath);
+        using var restored = new SqliteConnectionFactory(restoredPath).Open();
+        Assert.Equal(1, SqliteTestHelpers.Scalar(restored, "SELECT COUNT(*) FROM alerts;"));
+        Assert.Equal(
+            "only in the write-ahead log",
+            SqliteTestHelpers.Text(restored, "SELECT message FROM alerts;"));
+        Assert.Equal(2, SqliteTestHelpers.Scalar(restored, "SELECT MAX(version) FROM schema_versions;"));
     }
 
     [Fact]
