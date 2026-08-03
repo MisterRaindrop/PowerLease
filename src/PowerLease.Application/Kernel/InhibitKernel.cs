@@ -141,7 +141,13 @@ public sealed class InhibitKernel
                 {
                     EpochId = now.EpochId,
                     RemainingAtCheckpoint = resumed.Deadline.RemainingAt(now),
-                    CheckpointUtc = nowUtc
+                    CheckpointUtc = nowUtc,
+
+                    // Moved forward with the re-grant, even though this field is for display only. It was
+                    // written before the service went down, so leaving it alone would leave it in the past
+                    // for any outage longer than the lease -- and `powerlease list` works out the time
+                    // remaining from it, so it would report "0m left" for a lease with hours to run.
+                    ExpiresAtUtc = nowUtc + resumed.Deadline.RemainingAt(now)
                 },
                 Deadline = resumed.Deadline,
 
