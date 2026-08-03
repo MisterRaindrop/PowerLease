@@ -77,12 +77,16 @@ internal sealed class IpcRequestRouter
         ArgumentNullException.ThrowIfNull(request);
         ArgumentNullException.ThrowIfNull(caller);
 
-        // Releasing protection is deliberately outside the quota. In particular, a status-polling script can
-        // exhaust its caller's allowance without ever preventing that caller from ending its own hold. The
-        // exemption applies only to this protocol version, so a bogus envelope cannot evade the quota merely
-        // by putting ReleaseLease in its method field.
-        if ((request.ProtocolVersion != IpcProtocol.Version || request.Method != IpcMethods.ReleaseLease)
-            && IsRateLimited(caller))
+        // Releasing gets its own allowance rather than an exemption. A status-polling script must never use up
+        // the quota that lets its caller end a hold -- but an exempt method is an unbounded one, and every
+        // release reaching the kernel becomes a queued command on the single loop that decides whether this
+        // machine stays awake. Two separate windows keep both properties: neither can starve the other, and
+        // neither is unbounded. The choice of window depends on the protocol version being the one we
+        // understand, so a bogus envelope cannot pick its bucket by writing ReleaseLease in the method field.
+        var releasing = request.ProtocolVersion == IpcProtocol.Version
+            && request.Method == IpcMethods.ReleaseLease;
+
+        if (IsRateLimited(caller, releasing))
         {
             return ResponseEnvelope.Refused(
                 request.RequestId,
@@ -129,18 +133,24 @@ internal sealed class IpcRequestRouter
         };
     }
 
-    private bool IsRateLimited(CallerSnapshot caller)
+    /// <param name="releasing">
+    /// Whether this request ends a hold. Releases are counted in their own window, so however hard a caller
+    /// polls for status it still has its full allowance left for the one request that gives a machine back.
+    /// </param>
+    private bool IsRateLimited(CallerSnapshot caller, bool releasing)
     {
+        var key = releasing ? "release:" + caller.Sid : "request:" + caller.Sid;
         var now = _clock.Now;
+
         lock (_rateLimitSync)
         {
-            if (!_rateWindows.TryGetValue(caller.Sid, out var window)
+            if (!_rateWindows.TryGetValue(key, out var window)
                 || window.Start.EpochId != now.EpochId
                 || now.Elapsed < window.Start.Elapsed
                 || now.Elapsed - window.Start.Elapsed >= RateLimitWindow)
             {
-                _rateWindows[caller.Sid] = new CallerRateWindow(now, requestCount: 1);
-                RemoveExpiredRateWindows(now, caller.Sid);
+                _rateWindows[key] = new CallerRateWindow(now, requestCount: 1);
+                RemoveExpiredRateWindows(now, key);
                 return false;
             }
 
@@ -154,7 +164,7 @@ internal sealed class IpcRequestRouter
         }
     }
 
-    private void RemoveExpiredRateWindows(MonotonicStamp now, string currentSid)
+    private void RemoveExpiredRateWindows(MonotonicStamp now, string currentKey)
     {
         // A Windows machine normally has very few authenticated callers. Pruning only after the map grows past
         // that ordinary range keeps departed domain identities from accumulating for the life of the service.
@@ -165,7 +175,7 @@ internal sealed class IpcRequestRouter
 
         foreach (var (sid, window) in _rateWindows.ToArray())
         {
-            if (!string.Equals(sid, currentSid, StringComparison.Ordinal)
+            if (!string.Equals(sid, currentKey, StringComparison.Ordinal)
                 && (window.Start.EpochId != now.EpochId
                     || now.Elapsed < window.Start.Elapsed
                     || now.Elapsed - window.Start.Elapsed >= RateLimitWindow))
@@ -208,12 +218,11 @@ internal sealed class IpcRequestRouter
         };
 
         var result = await _dispatch(command, cancellationToken).ConfigureAwait(false);
-        if (result.Status == LeaseCommandStatus.Rejected
-            && result.Error?.Contains("request identifier", StringComparison.OrdinalIgnoreCase) == true)
-        {
-            return ResponseEnvelope.Refused(request.RequestId, result.Error);
-        }
 
+        // Every outcome the kernel produces, including a refusal, travels as an accepted envelope carrying a
+        // CommandResponse. The client turns a non-null Error into the same "refused" exit code either way, so
+        // singling out one rejection by matching words in its message bought nothing and would have changed
+        // behaviour silently the day somebody reworded it.
         return Accepted(
             request.RequestId,
             new CommandResponse(result.Status.ToString(), result.LeaseId, result.Error));

@@ -201,8 +201,14 @@ public sealed class IpcPipeIntegrationTests
             service.PipeName,
             CreateRequest(conflictId, "different content"),
             cancellationToken);
-        Assert.False(impostor.Accepted);
-        Assert.Contains("request identifier", impostor.Error!, StringComparison.OrdinalIgnoreCase);
+        // The request was answered, and the answer is a refusal. What matters is that this caller is told no
+        // and is not handed the outcome of the request already in flight under the same identifier -- asserted
+        // below by the original still getting its own reply, and by the lease count.
+        Assert.True(impostor.Accepted, impostor.Error);
+        var refusal = Read<CommandResponse>(impostor);
+        Assert.Equal(LeaseCommandStatus.Rejected.ToString(), refusal.Status);
+        Assert.Contains("request identifier", refusal.Error!, StringComparison.OrdinalIgnoreCase);
+        Assert.Null(refusal.LeaseId);
 
         await service.PumpCommandsAsync(cancellationToken);
         var original = await originalTask;
