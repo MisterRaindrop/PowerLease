@@ -14,6 +14,34 @@ namespace PowerLease.IntegrationTests;
 public sealed class WindowsAdapterTests
 {
     [Fact]
+    public void The_real_power_request_bindings_resolve_and_the_system_accepts_a_request()
+    {
+        // Every other request test drives a fake. That proves the manager's logic and nothing about whether
+        // the P/Invoke declarations are right: a wrong entry point name, a mis-marshalled reason context or a
+        // bad struct layout is invisible to a fake and would only appear on a real machine. Replacing the old
+        // real-API test with fakes closed a hole in the assertions and opened this one, so both now exist.
+        //
+        // Safe on a CI runner by construction: this only ever prevents sleep, and it lets go in the finally.
+        var manager = new PowerRequestManager();
+
+        try
+        {
+            var result = manager.Acquire(generation: 1);
+
+            Assert.True(
+                result == PowerInhibitResult.Held,
+                $"The system did not accept a keep-awake request ({result}). If the bindings are correct, "
+                + "this machine's active power plan is refusing application requests, which is itself worth "
+                + "knowing -- PowerLease cannot work here until that setting changes.");
+        }
+        finally
+        {
+            // Unconditional: a strengthened assertion that fails must not leave a real request outstanding.
+            manager.Close(generation: 1);
+        }
+    }
+
+    [Fact]
     public void Acquire_asks_Windows_for_system_required_and_never_display_required()
     {
         // POWER_REQUEST_TYPE does not start where one would guess: zero is PowerRequestDisplayRequired, and

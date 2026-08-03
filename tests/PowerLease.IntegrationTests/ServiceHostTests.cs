@@ -1,6 +1,7 @@
 using System.Text.Json;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using PowerLease.Application.Hosting;
 using PowerLease.Application.Inhibitors;
 using PowerLease.Application.Kernel;
 using PowerLease.Domain;
@@ -236,6 +237,90 @@ public sealed class ServiceHostTests
         { } type when type == typeof(ScheduleProducerWorker) => ScheduleEvaluator.SourceId,
         _ => throw new InvalidOperationException($"Unknown producer service '{implementationType}'.")
     };
+
+    [Fact]
+    public async Task A_retry_of_the_same_request_waits_for_the_one_answer()
+    {
+        // A client that lost its reply and reconnects must get the original outcome, not a second lease.
+        var dispatcher = new LeaseCommandDispatcher(NewLoop());
+
+        var first = dispatcher.PostAndWaitAsync(
+            Command("req-1", LeaseCommandKind.Create, "hash-a"), TestContext.Current.CancellationToken);
+        var retry = dispatcher.PostAndWaitAsync(
+            Command("req-1", LeaseCommandKind.Create, "hash-a"), TestContext.Current.CancellationToken);
+
+        dispatcher.Complete(new LeaseCommandResult("req-1", LeaseCommandStatus.Created, "lease-1"));
+
+        Assert.Equal(LeaseCommandStatus.Created, (await first).Status);
+        Assert.Equal("lease-1", (await retry).LeaseId);
+    }
+
+    [Fact]
+    public async Task A_different_request_reusing_an_identifier_in_flight_is_refused_its_predecessors_answer()
+    {
+        // The database refuses a reused identifier carrying different content, but only once the first request
+        // is durable. While one is still in flight, joining it would hand this caller somebody else's answer --
+        // for a release, a success naming a lease it never asked about.
+        var dispatcher = new LeaseCommandDispatcher(NewLoop());
+
+        var original = dispatcher.PostAndWaitAsync(
+            Command("req-1", LeaseCommandKind.Create, "hash-a"), TestContext.Current.CancellationToken);
+        var impostor = await dispatcher.PostAndWaitAsync(
+            Command("req-1", LeaseCommandKind.Release, "hash-b"), TestContext.Current.CancellationToken);
+
+        Assert.Equal(LeaseCommandStatus.Rejected, impostor.Status);
+        Assert.Contains("different request", impostor.Error!, StringComparison.OrdinalIgnoreCase);
+
+        // The request already in flight is untouched, and still gets its own answer.
+        Assert.False(original.IsCompleted);
+        dispatcher.Complete(new LeaseCommandResult("req-1", LeaseCommandStatus.Created, "lease-1"));
+        Assert.Equal(LeaseCommandStatus.Created, (await original).Status);
+    }
+
+    private static LeaseCommand Command(string requestId, LeaseCommandKind kind, string payloadHash) => new()
+    {
+        RequestId = requestId,
+        Caller = Caller(),
+        Kind = kind,
+        LeaseId = "lease-1",
+        Duration = TimeSpan.FromHours(1),
+        Deadline = new MonotonicStamp(Guid.NewGuid(), TimeSpan.FromHours(1)),
+        PayloadHash = payloadHash
+    };
+
+    private static KernelLoop NewLoop()
+    {
+        var kernel = new InhibitKernel(
+            new KernelOptions { ExpectedSources = [] },
+            new PowerInhibitCoordinator(new NoOpInhibitor()),
+            new FakeClock());
+
+        return new KernelLoop(kernel, new NoOpEffectExecutor(), new FakeTimeZones());
+    }
+
+    private sealed class NoOpInhibitor : IPowerInhibitor
+    {
+        public PowerInhibitResult Acquire(long generation) => PowerInhibitResult.Held;
+
+        public void Close(long generation)
+        {
+        }
+    }
+
+    private sealed class NoOpEffectExecutor : IEffectExecutor
+    {
+        public Task<EffectCompletion> ExecuteAsync(KernelEffect effect, CancellationToken cancellationToken) =>
+            Task.FromResult(new EffectCompletion(effect.EffectId, EffectOutcome.Succeeded));
+    }
+
+    private sealed class FakeTimeZones : ITimeZoneProvider
+    {
+        public TimeZoneInfo Current => TimeZoneInfo.Utc;
+
+        public void Refresh()
+        {
+        }
+    }
 
     private sealed class FakeClock : IClock
     {
