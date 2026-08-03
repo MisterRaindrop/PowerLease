@@ -176,7 +176,7 @@ public sealed partial class OpenSshEventProvider : ISshAuthLogReader
             $"{LastReadDiscontinuityDetail} Re-seeding could not finish: {reseeded.Detail}");
     }
 
-    private SshLogRead ReadCore(string? bookmarkXml, string? incarnation)
+    private static SshLogRead ReadCore(string? bookmarkXml, string? incarnation)
     {
         EventBookmark? startingBookmark = bookmarkXml is null ? null : new EventBookmark(bookmarkXml);
         var query = new EventLogQuery(ChannelName, PathType.LogName, "*");
