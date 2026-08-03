@@ -80,6 +80,7 @@ internal sealed class HistoryFixture : IDisposable
         Source = LeaseSource.SshSession,
         Reason = "SSH session from 10.0.0.5",
         OwnerUser = "liu",
+        OwnerSid = "S-1-5-21-1",
         RemoteIp = "10.0.0.5",
         ProcessId = 4242,
         ProcessName = "sshd",

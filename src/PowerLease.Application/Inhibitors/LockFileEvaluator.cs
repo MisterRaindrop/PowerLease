@@ -32,7 +32,15 @@ public sealed class LockFileEvaluator
 
     private readonly string? _path;
 
-    /// <param name="path">Where to look, or null to switch the rule off.</param>
+    /// <param name="path">
+    /// Where to look, or null to switch the rule off.
+    /// <para>
+    /// The configuration's own <c>lockFile</c> being null does NOT mean this: it means the default location
+    /// under the data directory, which is the path a build script can rely on without editing any
+    /// configuration. The host resolves that before constructing this, so null arrives here only when
+    /// something has genuinely decided the rule is off.
+    /// </para>
+    /// </param>
     public LockFileEvaluator(string? path)
     {
         _path = string.IsNullOrWhiteSpace(path) ? null : path;
